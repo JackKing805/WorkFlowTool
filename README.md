@@ -7,6 +7,8 @@
 - Kotlin/JVM 17
 - Compose Multiplatform Desktop
 - Java AWT/ImageIO 图像处理核心
+- Rust 原生图像检测后端
+- `imageproc` 纯 Rust 图像连通域识别
 
 ## 运行
 
@@ -19,6 +21,7 @@ gradle run
 ```powershell
 .\gradlew.bat run
 ```
+
 
 ## 打包
 
@@ -37,4 +40,3 @@ gradle packageDistributionForCurrentOS
 - 移动、缩放、隐藏、删除、多选裁剪区域
 - 批量导出 PNG/JPG/WEBP
 - 支持透明边距裁剪、补齐正方形、固定尺寸缩放和命名规则
-

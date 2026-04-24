@@ -60,7 +60,7 @@ class IconExporter {
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {
         var image = if (config.trimTransparentPadding) trimTransparent(input) else copy(input)
         if (config.padToSquare) image = padToSquare(image)
-        config.fixedSize?.takeIf { it > 0 }?.let { size ->
+        config.fixedSize?.takeIf { it > 0 && !config.keepOriginalSize }?.let { size ->
             image = resize(image, size, size)
         }
         return image
@@ -136,4 +136,3 @@ class IconExporter {
         }.replace(Regex("""[\\/:*?"<>|]"""), "_")
     }
 }
-

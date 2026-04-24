@@ -21,8 +21,38 @@ data class DetectionConfig(
     val gapThreshold: Int = 4,
     val alphaThreshold: Int = 8,
     val backgroundTolerance: Int = 12,
+    val edgeSampleWidth: Int = 2,
+    val minPixelArea: Int = 24,
+    val colorDistanceThreshold: Int = 36,
+    val dilateIterations: Int = 0,
+    val erodeIterations: Int = 0,
+    val enableHoleFill: Boolean = true,
+    val bboxPadding: Int = 1,
     val mergeNearbyRegions: Boolean = true,
-    val removeSmallRegions: Boolean = true
+    val removeSmallRegions: Boolean = true,
+    val useManualBackground: Boolean = false,
+    val manualBackgroundArgb: Int = 0
+)
+
+enum class DetectionMode {
+    ALPHA_MASK,
+    SOLID_BACKGROUND,
+    FALLBACK_BACKGROUND
+}
+
+data class DetectionStats(
+    val estimatedBackgroundArgb: Int,
+    val candidatePixels: Int,
+    val connectedComponents: Int,
+    val regionCount: Int,
+    val backgroundSampleCount: Int,
+    val totalTimeMs: Long
+)
+
+data class DetectionResult(
+    val regions: List<CropRegion>,
+    val mode: DetectionMode,
+    val stats: DetectionStats
 )
 
 data class ExportConfig(
@@ -49,16 +79,16 @@ enum class NamingMode {
     CustomPrefixSequence
 }
 
-enum class SplitMode {
+enum class SplitSource {
     AutoDetect,
-    Grid,
-    Custom
+    SmartGrid
 }
 
 enum class ToolMode {
     Select,
     Move,
-    Draw
+    Draw,
+    Magic
 }
 
 data class GridConfig(
@@ -69,7 +99,13 @@ data class GridConfig(
     val offsetX: Int = 0,
     val offsetY: Int = 0,
     val gapX: Int = 0,
-    val gapY: Int = 0
+    val gapY: Int = 0,
+    val snapToContent: Boolean = true,
+    val searchPadding: Int = 12,
+    val ignoreEmptyCells: Boolean = true,
+    val trimCellToContent: Boolean = true,
+    val alphaThreshold: Int = 8,
+    val backgroundTolerance: Int = 12
 )
 
 data class ExportResult(
@@ -77,4 +113,3 @@ data class ExportResult(
     val failureCount: Int,
     val failures: List<String>
 )
-
