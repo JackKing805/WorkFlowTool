@@ -98,7 +98,13 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                             onSelect = controller::selectRegion,
                             onMagicSelect = controller::applyMagicSelection,
                             onBackgroundPick = controller::sampleBackgroundAt,
-                            onHover = controller::updatePointerHover
+                            onHover = controller::updatePointerHover,
+                            onDeleteRegion = controller::removeRegion,
+                            onToggleRegionVisibility = controller::toggleVisibility,
+                            onFocusRegion = controller::selectAndFocusRegion,
+                            onOpenRegionPreview = controller::openRegionPreview,
+                            onFitToViewport = controller::fitToViewport,
+                            onClearRegions = controller::clearRegions
                         )
                         Spacer(Modifier.height(12.dp))
                         PreviewStatusBar(controller)
