@@ -9,11 +9,27 @@ data class CropRegion(
     val width: Int,
     val height: Int,
     val visible: Boolean = true,
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    val points: List<RegionPoint> = emptyList()
 ) {
     val right: Int get() = x + width
     val bottom: Int get() = y + height
+
+    val editPoints: List<RegionPoint>
+        get() = points.ifEmpty {
+            listOf(
+                RegionPoint(x, y),
+                RegionPoint(right, y),
+                RegionPoint(right, bottom),
+                RegionPoint(x, bottom)
+            )
+        }
 }
+
+data class RegionPoint(
+    val x: Int,
+    val y: Int
+)
 
 data class DetectionConfig(
     val minWidth: Int = 16,

@@ -1,0 +1,7 @@
+{
+  "status": "dataset_ready",
+  "records": 1,
+  "training": "skipped",
+  "reason": "PyTorch is not installed: No module named 'torch'",
+  "next": "Install PyTorch/Ultralytics or export this dataset to a training machine."
+}

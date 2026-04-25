@@ -151,4 +151,44 @@ class NativeDetectorBridgeTest {
         assertEquals(1, result.regions.size)
         assertEquals(6, result.regions.first().x)
     }
+
+    @Test
+    fun cppBridgeMergesMagicMasksWhenLibraryIsPresent() {
+        if (!CppDetectorBridge.isLoaded) return
+
+        val currentMask = BooleanArray(25)
+        currentMask[1 * 5 + 1] = true
+        val addedMask = BooleanArray(25)
+        addedMask[3 * 5 + 3] = true
+
+        val current = MagicSelectionPreview(
+            seedX = 1,
+            seedY = 1,
+            regionId = "1",
+            mask = currentMask,
+            imageWidth = 5,
+            imageHeight = 5,
+            pixelCount = 1
+        )
+        val added = MagicSelectionResult(
+            region = io.github.workflowtool.model.CropRegion("2", 3, 3, 1, 1),
+            mask = addedMask,
+            imageWidth = 5,
+            imageHeight = 5,
+            seedX = 3,
+            seedY = 3,
+            pixelCount = 1
+        )
+
+        assertFalse(CppDetectorBridge.magicMaskContains(current.mask, 5, 5, 3, 3))
+        val merged = CppDetectorBridge.mergeMagicMasks(current, added, bboxPadding = 0)
+
+        assertNotNull(merged)
+        assertEquals(2, merged.pixelCount)
+        assertEquals(1, merged.region.x)
+        assertEquals(1, merged.region.y)
+        assertEquals(3, merged.region.width)
+        assertEquals(3, merged.region.height)
+        assertTrue(CppDetectorBridge.magicMaskContains(merged.mask, 5, 5, 3, 3))
+    }
 }

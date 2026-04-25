@@ -354,3 +354,73 @@ int32_t builtin_detect_magic_region(const NativeImageBuffer* image, int32_t seed
         return ERR_PANIC;
     }
 }
+
+int32_t merge_magic_masks_impl(
+    const uint8_t* current_mask,
+    int32_t current_length,
+    const uint8_t* added_mask,
+    int32_t added_length,
+    int32_t width,
+    int32_t height,
+    int32_t bbox_padding,
+    NativeMagicResult* result
+) {
+    try {
+        if (!current_mask || !added_mask || !result || width <= 0 || height <= 0) return ERR_INVALID_ARGUMENT;
+        const int total = width * height;
+        if (current_length != total || added_length != total) return ERR_INVALID_ARGUMENT;
+        std::memset(result, 0, sizeof(NativeMagicResult));
+
+        std::vector<uint8_t> merged(static_cast<size_t>(total), 0);
+        bool changed = false;
+        int pixels = 0;
+        int min_x = width;
+        int min_y = height;
+        int max_x = -1;
+        int max_y = -1;
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const int index = idx(x, y, width);
+                const uint8_t selected = (current_mask[index] != 0 || added_mask[index] != 0) ? 1 : 0;
+                merged[index] = selected;
+                if (!selected) continue;
+                pixels += 1;
+                min_x = std::min(min_x, x);
+                min_y = std::min(min_y, y);
+                max_x = std::max(max_x, x);
+                max_y = std::max(max_y, y);
+                if (added_mask[index] != 0 && current_mask[index] == 0) changed = true;
+            }
+        }
+
+        if (!changed || pixels <= 0 || max_x < min_x || max_y < min_y) return 0;
+
+        const int pad = std::max(0, bbox_padding);
+        const int left = std::max(0, min_x - pad);
+        const int top = std::max(0, min_y - pad);
+        const int right = std::min(width - 1, max_x + pad);
+        const int bottom = std::min(height - 1, max_y + pad);
+        result->region = {left, top, right - left + 1, bottom - top + 1, 1, 1};
+        result->mask_length = total;
+        result->mask = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(total)));
+        if (!result->mask) return ERR_INVALID_ARGUMENT;
+        std::memcpy(result->mask, merged.data(), static_cast<size_t>(total));
+        result->image_width = width;
+        result->image_height = height;
+        result->seed_x = 0;
+        result->seed_y = 0;
+        result->pixel_count = pixels;
+        result->found = 1;
+        return 0;
+    } catch (...) {
+        return ERR_PANIC;
+    }
+}
+
+int32_t magic_mask_contains_impl(const uint8_t* mask, int32_t mask_length, int32_t width, int32_t height, int32_t x, int32_t y) {
+    if (!mask || width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height) return 0;
+    const int index = idx(x, y, width);
+    if (index < 0 || index >= mask_length) return 0;
+    return mask[index] != 0 ? 1 : 0;
+}

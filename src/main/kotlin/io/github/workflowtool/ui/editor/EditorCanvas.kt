@@ -21,15 +21,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -38,7 +38,6 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -46,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
 import io.github.workflowtool.application.MagicSelectionPreview
 import io.github.workflowtool.model.CropRegion
+import io.github.workflowtool.model.RegionPoint
 import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.ui.theme.Accent
 import io.github.workflowtool.ui.theme.Panel
@@ -54,23 +54,17 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.util.UUID
 
-private enum class ResizeCorner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight
-}
-
 private enum class DragKind {
     Pan,
     RegionEdit,
-    Draw
+    Draw,
+    Magic
 }
 
 private data class DragSession(
     val kind: DragKind,
     val regionId: String?,
-    val resizeCorner: ResizeCorner?,
+    val pointIndex: Int?,
     val baseRegions: List<CropRegion>,
     val start: Offset
 )
@@ -95,6 +89,7 @@ fun EditorCanvas(
     onCommit: (String, List<CropRegion>) -> Unit,
     onSelect: (String, Boolean) -> Unit,
     onMagicSelect: (Offset) -> Unit,
+    onMagicExtend: (Offset) -> Unit,
     onBackgroundPick: (Offset) -> Unit,
     onHover: (Offset?) -> Unit,
     onDeleteRegion: (String) -> Unit,
@@ -113,9 +108,9 @@ fun EditorCanvas(
     val latestViewportOffset by rememberUpdatedState(viewportOffset)
     val latestToolMode by rememberUpdatedState(toolMode)
     val latestBackgroundPickArmed by rememberUpdatedState(backgroundPickArmed)
-    val density = LocalDensity.current
 
     val renderedRegions = workingRegions ?: regions
+    val visibleOverlayRegions = (renderedRegions + listOfNotNull(draftRegion)).filter { it.visible }
     val maxWidth = imageWidth ?: 1024
     val maxHeight = imageHeight ?: 1024
 
@@ -135,8 +130,10 @@ fun EditorCanvas(
                 }
                 contextMenu = CanvasContextMenuState(
                     regionId = hit?.id,
+                    imagePoint = imagePoint,
+                    pointIndex = hit?.let { findPointHit(it, imagePoint, latestZoom) },
                     visible = true,
-                    offset = with(density) { DpOffset(change.position.x.toDp(), change.position.y.toDp()) }
+                    offset = IntOffset(change.position.x.roundToInt(), change.position.y.roundToInt())
                 )
             }
     ) {
@@ -144,19 +141,28 @@ fun EditorCanvas(
             Modifier.fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures(
+                        onDoubleTap = { offset ->
+                            val imagePoint = screenToImage(offset, latestViewportOffset, latestZoom)
+                            if (latestToolMode == ToolMode.Magic) {
+                                if (findRegionHit(latestRegions, imagePoint) != null) return@detectTapGestures
+                                onMagicSelect(imagePoint)
+                            }
+                        },
                         onTap = { offset ->
                             val imagePoint = screenToImage(offset, latestViewportOffset, latestZoom)
                             if (latestBackgroundPickArmed) {
                                 onBackgroundPick(imagePoint)
                                 return@detectTapGestures
                             }
-                            if (latestToolMode == ToolMode.Magic) {
-                                onMagicSelect(imagePoint)
-                                return@detectTapGestures
-                            }
                             contextMenu = null
                             val hit = findRegionHit(latestRegions, imagePoint)
-                            hit?.let { onSelect(it.id, false) }
+                            if (hit != null) {
+                                onSelect(hit.id, false)
+                                return@detectTapGestures
+                            }
+                            if (latestToolMode == ToolMode.Magic) {
+                                onMagicSelect(imagePoint)
+                            }
                         }
                     )
                 }
@@ -193,6 +199,11 @@ fun EditorCanvas(
                                     workingRegions = base
                                     onSelect(active.id, false)
                                 }
+                                latestToolMode == ToolMode.Magic -> {
+                                    dragSession = DragSession(DragKind.Magic, null, null, latestRegions, imagePoint)
+                                    workingRegions = null
+                                    onMagicSelect(imagePoint)
+                                }
                                 latestToolMode != ToolMode.Draw -> {
                                     dragSession = DragSession(DragKind.Pan, null, null, latestRegions, offset)
                                     workingRegions = null
@@ -218,19 +229,16 @@ fun EditorCanvas(
                                 DragKind.Pan -> onPan(dragAmount)
                                 DragKind.RegionEdit -> {
                                     val current = screenToImage(change.position, latestViewportOffset, latestZoom)
-                                    val next = if (session.resizeCorner != null) {
+                                    val next = if (session.pointIndex != null) {
                                         session.baseRegions.map {
-                                            if (it.id == session.regionId) resizeRegion(it, session.resizeCorner, current, maxWidth, maxHeight) else it
+                                            if (it.id == session.regionId) moveRegionPoint(it, session.pointIndex, current, maxWidth, maxHeight) else it
                                         }
                                     } else {
                                         val dx = (dragAmount.x / latestZoom).roundToInt()
                                         val dy = (dragAmount.y / latestZoom).roundToInt()
                                         (workingRegions ?: session.baseRegions).map {
                                             if (it.selected) {
-                                                it.copy(
-                                                    x = (it.x + dx).coerceIn(0, maxWidth - it.width),
-                                                    y = (it.y + dy).coerceIn(0, maxHeight - it.height)
-                                                )
+                                                moveRegion(it, dx, dy, maxWidth, maxHeight)
                                             } else {
                                                 it
                                             }
@@ -254,6 +262,9 @@ fun EditorCanvas(
                                         selected = true
                                     )
                                 }
+                                DragKind.Magic -> {
+                                    onMagicExtend(screenToImage(change.position, latestViewportOffset, latestZoom))
+                                }
                             }
                         },
                         onDragEnd = {
@@ -266,7 +277,7 @@ fun EditorCanvas(
                                 DragKind.RegionEdit -> {
                                     workingRegions?.let { onCommit("编辑区域", it) }
                                 }
-                                DragKind.Pan, null -> Unit
+                                DragKind.Pan, DragKind.Magic, null -> Unit
                             }
                             dragSession = null
                             draftRegion = null
@@ -289,22 +300,13 @@ fun EditorCanvas(
                 drawMagicMask(it, zoom, viewportOffset)
                 drawSeedMarker(it.seedX, it.seedY, zoom, viewportOffset)
             }
-            (renderedRegions + listOfNotNull(draftRegion)).filter { it.visible }.forEach { region ->
-                val rect = Rect(
-                    offset = Offset(region.x * zoom, region.y * zoom) + viewportOffset,
-                    size = Size(region.width * zoom, region.height * zoom)
-                )
+            visibleOverlayRegions.forEach { region ->
                 val color = if (region.selected) Color(0xFF74A5FF) else Accent
-                drawRect(color, topLeft = rect.topLeft, size = rect.size, style = Stroke(width = if (region.selected) 3f else 2f))
-                drawRect(color.copy(alpha = 0.16f), topLeft = rect.topLeft, size = rect.size)
-                drawHandle(rect.topLeft, color)
-                drawHandle(Offset(rect.right, rect.top), color)
-                drawHandle(Offset(rect.left, rect.bottom), color)
-                drawHandle(Offset(rect.right, rect.bottom), color)
+                drawRegionOutline(region, zoom, viewportOffset, color)
             }
         }
 
-        (renderedRegions + listOfNotNull(draftRegion)).filter { it.visible }.forEachIndexed { index, region ->
+        visibleOverlayRegions.forEachIndexed { index, region ->
             Box(
                 Modifier.offset((region.x * zoom + viewportOffset.x + 1).roundToInt().dp, (region.y * zoom + viewportOffset.y + 1).roundToInt().dp)
                     .size(20.dp)
@@ -317,54 +319,46 @@ fun EditorCanvas(
         }
 
         contextMenu?.let { state ->
-            DropdownMenu(
-                expanded = state.visible,
-                onDismissRequest = { contextMenu = null },
-                offset = state.offset
+            Box(
+                Modifier.offset { state.offset }
+                    .size(1.dp)
             ) {
-                if (state.regionId != null) {
-                    DropdownMenuItem(onClick = {
-                        onFocusRegion(state.regionId, false)
-                        contextMenu = null
-                    }) {
-                        Text("选中区域")
-                    }
-                    DropdownMenuItem(onClick = {
-                        onFocusRegion(state.regionId, true)
-                        contextMenu = null
-                    }) {
-                        Text("聚焦区域")
-                    }
-                    DropdownMenuItem(onClick = {
-                        onOpenRegionPreview(state.regionId)
-                        contextMenu = null
-                    }) {
-                        Text("预览区域")
-                    }
-                    DropdownMenuItem(onClick = {
-                        onToggleRegionVisibility(state.regionId)
-                        contextMenu = null
-                    }) {
-                        Text(regions.lastOrNull { it.id == state.regionId }?.let { if (it.visible) "隐藏区域" else "显示区域" } ?: "切换显示")
-                    }
-                    DropdownMenuItem(onClick = {
-                        onDeleteRegion(state.regionId)
-                        contextMenu = null
-                    }) {
-                        Text("删除区域", color = Color(0xFFFF7C74))
-                    }
-                } else {
-                    DropdownMenuItem(onClick = {
-                        onFitToViewport()
-                        contextMenu = null
-                    }) {
-                        Text("适应窗口")
-                    }
-                    DropdownMenuItem(onClick = {
-                        onClearRegions()
-                        contextMenu = null
-                    }) {
-                        Text("清空区域", color = Color(0xFFFF7C74))
+                DropdownMenu(
+                    expanded = state.visible,
+                    onDismissRequest = { contextMenu = null }
+                ) {
+                    if (state.regionId != null) {
+                        val targetRegion = regions.lastOrNull { it.id == state.regionId }
+                        CanvasContextItem("选中区域", onDismiss = { contextMenu = null }) { onFocusRegion(state.regionId, false) }
+                        CanvasContextItem("聚焦区域", onDismiss = { contextMenu = null }) { onFocusRegion(state.regionId, true) }
+                        CanvasContextItem("预览区域", onDismiss = { contextMenu = null }) { onOpenRegionPreview(state.regionId) }
+                        CanvasContextItem("添加角", onDismiss = { contextMenu = null }) {
+                            targetRegion?.let { region ->
+                                onCommit("添加选框角", latestRegions.replaceRegion(addRegionPoint(region, state.imagePoint, maxWidth, maxHeight)))
+                            }
+                        }
+                        if (targetRegion != null && state.pointIndex != null && targetRegion.editPoints.size > 3) {
+                            CanvasContextItem(
+                                "删除角",
+                                color = Color(0xFFFFB36A),
+                                onDismiss = { contextMenu = null },
+                                onClick = {
+                                    onCommit("删除选框角", latestRegions.replaceRegion(removeRegionPoint(targetRegion, state.pointIndex)))
+                                }
+                            )
+                        }
+                        CanvasContextItem(
+                            regions.lastOrNull { it.id == state.regionId }?.let { if (it.visible) "隐藏区域" else "显示区域" } ?: "切换显示",
+                            onDismiss = { contextMenu = null }
+                        ) {
+                            onToggleRegionVisibility(state.regionId)
+                        }
+                        CanvasContextItem("删除区域", color = Color(0xFFFF7C74), onDismiss = { contextMenu = null }) {
+                            onDeleteRegion(state.regionId)
+                        }
+                    } else {
+                        CanvasContextItem("适应窗口", onDismiss = { contextMenu = null }, onClick = onFitToViewport)
+                        CanvasContextItem("清空区域", color = Color(0xFFFF7C74), onDismiss = { contextMenu = null }, onClick = onClearRegions)
                     }
                 }
             }
@@ -374,9 +368,26 @@ fun EditorCanvas(
 
 private data class CanvasContextMenuState(
     val regionId: String?,
+    val imagePoint: Offset,
+    val pointIndex: Int?,
     val visible: Boolean,
-    val offset: DpOffset
+    val offset: IntOffset
 )
+
+@Composable
+private fun CanvasContextItem(
+    label: String,
+    color: Color = Color.Unspecified,
+    onDismiss: () -> Unit,
+    onClick: () -> Unit
+) {
+    DropdownMenuItem(onClick = {
+        onClick()
+        onDismiss()
+    }) {
+        Text(label, color = color)
+    }
+}
 
 private fun screenToImage(point: Offset, viewportOffset: Offset, zoom: Float): Offset = (point - viewportOffset) / zoom
 
@@ -384,58 +395,121 @@ private fun Offset.div(value: Float) = Offset(x / value, y / value)
 
 private fun findRegionHit(regions: List<CropRegion>, point: Offset): CropRegion? {
     return regions.lastOrNull {
-        it.visible &&
-            point.x in it.x.toFloat()..it.right.toFloat() &&
-            point.y in it.y.toFloat()..it.bottom.toFloat()
+        it.visible && pointInsideRegion(it, point)
     }
 }
 
-private fun hitResizeCorner(region: CropRegion, point: Offset, zoom: Float): ResizeCorner? {
+private fun pointInsideRegion(region: CropRegion, point: Offset): Boolean {
+    val points = region.editPoints
+    if (points.size < 3) {
+        return point.x in region.x.toFloat()..region.right.toFloat() &&
+            point.y in region.y.toFloat()..region.bottom.toFloat()
+    }
+
+    var inside = false
+    var previous = points.last()
+    for (current in points) {
+        val crosses = (current.y > point.y) != (previous.y > point.y)
+        if (crosses) {
+            val intersectionX = (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y).toFloat() + current.x
+            if (point.x < intersectionX) inside = !inside
+        }
+        previous = current
+    }
+    return inside
+}
+
+private fun findPointHit(region: CropRegion, point: Offset, zoom: Float): Int? {
     if (!region.visible) return null
     val radius = (10f / zoom).coerceAtLeast(4f)
-    fun near(x: Int, y: Int) = abs(point.x - x) <= radius && abs(point.y - y) <= radius
-    return when {
-        near(region.x, region.y) -> ResizeCorner.TopLeft
-        near(region.right, region.y) -> ResizeCorner.TopRight
-        near(region.x, region.bottom) -> ResizeCorner.BottomLeft
-        near(region.right, region.bottom) -> ResizeCorner.BottomRight
-        else -> null
-    }
+    return region.editPoints.indexOfLast { abs(point.x - it.x) <= radius && abs(point.y - it.y) <= radius }
+        .takeIf { it >= 0 }
 }
 
-private fun findHandleHit(regions: List<CropRegion>, point: Offset, zoom: Float): Pair<CropRegion, ResizeCorner>? {
+private fun findHandleHit(regions: List<CropRegion>, point: Offset, zoom: Float): Pair<CropRegion, Int>? {
     for (index in regions.indices.reversed()) {
         val region = regions[index]
-        val corner = hitResizeCorner(region, point, zoom)
-        if (corner != null) return region to corner
+        val pointIndex = findPointHit(region, point, zoom)
+        if (pointIndex != null) return region to pointIndex
     }
     return null
 }
 
-private fun resizeRegion(region: CropRegion, corner: ResizeCorner, point: Offset, imageWidth: Int, imageHeight: Int): CropRegion {
-    val minSize = 2
-    return when (corner) {
-        ResizeCorner.TopLeft -> {
-            val x = point.x.roundToInt().coerceIn(0, region.right - minSize)
-            val y = point.y.roundToInt().coerceIn(0, region.bottom - minSize)
-            region.copy(x = x, y = y, width = region.right - x, height = region.bottom - y)
-        }
-        ResizeCorner.TopRight -> {
-            val right = point.x.roundToInt().coerceIn(region.x + minSize, imageWidth)
-            val y = point.y.roundToInt().coerceIn(0, region.bottom - minSize)
-            region.copy(y = y, width = right - region.x, height = region.bottom - y)
-        }
-        ResizeCorner.BottomLeft -> {
-            val x = point.x.roundToInt().coerceIn(0, region.right - minSize)
-            val bottom = point.y.roundToInt().coerceIn(region.y + minSize, imageHeight)
-            region.copy(x = x, width = region.right - x, height = bottom - region.y)
-        }
-        ResizeCorner.BottomRight -> {
-            val right = point.x.roundToInt().coerceIn(region.x + minSize, imageWidth)
-            val bottom = point.y.roundToInt().coerceIn(region.y + minSize, imageHeight)
-            region.copy(width = right - region.x, height = bottom - region.y)
+private fun moveRegionPoint(region: CropRegion, pointIndex: Int, point: Offset, imageWidth: Int, imageHeight: Int): CropRegion {
+    val points = region.editPoints.toMutableList()
+    if (pointIndex !in points.indices) return region
+    points[pointIndex] = RegionPoint(
+        point.x.roundToInt().coerceIn(0, imageWidth),
+        point.y.roundToInt().coerceIn(0, imageHeight)
+    )
+    return region.withPoints(points)
+}
+
+private fun moveRegion(region: CropRegion, dx: Int, dy: Int, imageWidth: Int, imageHeight: Int): CropRegion {
+    val clampedDx = dx.coerceIn(-region.x, imageWidth - region.right)
+    val clampedDy = dy.coerceIn(-region.y, imageHeight - region.bottom)
+    val points = region.editPoints.map { RegionPoint(it.x + clampedDx, it.y + clampedDy) }
+    return region.withPoints(points)
+}
+
+private fun addRegionPoint(region: CropRegion, point: Offset, imageWidth: Int, imageHeight: Int): CropRegion {
+    val newPoint = RegionPoint(
+        point.x.roundToInt().coerceIn(0, imageWidth),
+        point.y.roundToInt().coerceIn(0, imageHeight)
+    )
+    val points = region.editPoints
+    val insertAt = nearestSegmentIndex(points, newPoint) + 1
+    return region.withPoints(points.toMutableList().apply { add(insertAt, newPoint) })
+}
+
+private fun removeRegionPoint(region: CropRegion, pointIndex: Int): CropRegion {
+    val points = region.editPoints
+    if (points.size <= 3 || pointIndex !in points.indices) return region
+    return region.withPoints(points.toMutableList().apply { removeAt(pointIndex) })
+}
+
+private fun List<CropRegion>.replaceRegion(updated: CropRegion): List<CropRegion> =
+    map { if (it.id == updated.id) updated else it }
+
+private fun CropRegion.withPoints(points: List<RegionPoint>): CropRegion {
+    val minX = points.minOf { it.x }
+    val minY = points.minOf { it.y }
+    val maxX = points.maxOf { it.x }
+    val maxY = points.maxOf { it.y }
+    return copy(
+        x = minX,
+        y = minY,
+        width = (maxX - minX).coerceAtLeast(1),
+        height = (maxY - minY).coerceAtLeast(1),
+        points = points
+    )
+}
+
+private fun nearestSegmentIndex(points: List<RegionPoint>, point: RegionPoint): Int {
+    var bestIndex = 0
+    var bestDistance = Float.MAX_VALUE
+    for (index in points.indices) {
+        val next = points[(index + 1) % points.size]
+        val distance = distanceToSegment(point, points[index], next)
+        if (distance < bestDistance) {
+            bestDistance = distance
+            bestIndex = index
         }
     }
+    return bestIndex
+}
+
+private fun distanceToSegment(point: RegionPoint, start: RegionPoint, end: RegionPoint): Float {
+    val dx = (end.x - start.x).toFloat()
+    val dy = (end.y - start.y).toFloat()
+    val lengthSquared = dx * dx + dy * dy
+    if (lengthSquared == 0f) return abs(point.x - start.x) + abs(point.y - start.y).toFloat()
+    val t = (((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared).coerceIn(0f, 1f)
+    val projectionX = start.x + t * dx
+    val projectionY = start.y + t * dy
+    val px = point.x - projectionX
+    val py = point.y - projectionY
+    return px * px + py * py
 }
 
 fun DrawScope.drawCheckerboard(size: Size) {
@@ -476,6 +550,24 @@ fun DrawScope.drawGrid(size: Size, zoom: Float, viewportOffset: Offset) {
 fun DrawScope.drawHandle(center: Offset, color: Color) {
     drawCircle(color = Color.White, radius = 5f, center = center)
     drawCircle(color = color, radius = 3.2f, center = center)
+}
+
+private fun DrawScope.drawRegionOutline(region: CropRegion, zoom: Float, viewportOffset: Offset, color: Color) {
+    val points = region.editPoints.map { Offset(it.x * zoom, it.y * zoom) + viewportOffset }
+    if (points.size < 3) return
+
+    val path = Path().apply {
+        moveTo(points.first().x, points.first().y)
+        points.drop(1).forEach { lineTo(it.x, it.y) }
+        close()
+    }
+    val stroke = Stroke(
+        width = if (region.selected) 3f else 2f,
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f))
+    )
+    drawPath(path, color.copy(alpha = 0.16f))
+    drawPath(path, color, style = stroke)
+    points.forEach { drawHandle(it, color) }
 }
 
 private fun DrawScope.drawMagicMask(preview: MagicSelectionPreview, zoom: Float, viewportOffset: Offset) {

@@ -91,6 +91,25 @@ class AppControllerTest {
     }
 
     @Test
+    fun redoRestoresUndoAvailability() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions("first", listOf(CropRegion("1", 1, 1, 10, 10)))
+        controller.undo()
+        controller.redo()
+
+        assertTrue(controller.canUndo)
+        assertEquals(1, controller.regions.size)
+    }
+
+    @Test
     fun magicSelectionCreatesRegionFromClickedArea() {
         val controller = AppController(
             detector = StaticDetector(),
@@ -166,6 +185,63 @@ class AppControllerTest {
         assertEquals(1, controller.regions.size)
         assertEquals(first.id, refreshed.id)
         assertTrue(refreshed.width > first.width)
+    }
+
+    @Test
+    fun magicSelectionReplacesExistingHitRegionInsteadOfCreatingNewRegion() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createToleranceImageFile())
+        controller.enterMagicSelectionMode()
+        controller.updateMagicTolerance(8)
+        controller.replaceRegions(
+            "test",
+            listOf(CropRegion("1", 5, 5, 4, 4, selected = true))
+        )
+
+        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
+
+        val refreshed = controller.selectedRegion
+        assertNotNull(refreshed)
+        assertEquals(1, controller.regions.size)
+        assertEquals("1", refreshed.id)
+        assertTrue(refreshed.width > 4)
+        assertTrue(refreshed.height > 4)
+    }
+
+    @Test
+    fun draggingMagicSelectionAddsDifferentColorRegionToCurrentSelection() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createToleranceImageFile())
+        controller.enterMagicSelectionMode()
+        controller.updateMagicTolerance(8)
+        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
+        val first = controller.selectedRegion
+        assertNotNull(first)
+
+        controller.extendMagicSelection(androidx.compose.ui.geometry.Offset(17f, 7f))
+
+        val merged = controller.selectedRegion
+        assertNotNull(merged)
+        assertEquals(1, controller.regions.size)
+        assertEquals(first.id, merged.id)
+        assertTrue(merged.width > first.width)
+        assertTrue(controller.magicSelectionPreview?.pixelCount ?: 0 > first.width * first.height)
     }
 
     @Test
@@ -258,6 +334,43 @@ class AppControllerTest {
         assertEquals(0xFFF2F3F5.toInt(), detector.lastConfig.manualBackgroundArgb)
     }
 
+    @Test
+    fun loadingImageClampsDetectedRegionPointsIntoImageBounds() {
+        val controller = AppController(
+            detector = StaticDetector(
+                listOf(
+                    CropRegion(
+                        id = "raw",
+                        x = -10,
+                        y = -12,
+                        width = 100,
+                        height = 80,
+                        points = listOf(
+                            io.github.workflowtool.model.RegionPoint(-10, -12),
+                            io.github.workflowtool.model.RegionPoint(100, -12),
+                            io.github.workflowtool.model.RegionPoint(100, 80),
+                            io.github.workflowtool.model.RegionPoint(-10, 80)
+                        )
+                    )
+                )
+            ),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createImageFile(width = 32, height = 24))
+
+        val region = controller.regions.single()
+        assertEquals(0, region.x)
+        assertEquals(0, region.y)
+        assertEquals(32, region.width)
+        assertEquals(24, region.height)
+        assertTrue(region.points.all { it.x in 0..32 && it.y in 0..24 })
+    }
+
     private fun createImageFile(width: Int = 64, height: Int = 32): java.io.File {
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
         val graphics = image.createGraphics()
@@ -342,9 +455,11 @@ private class CountingDetector : RegionDetector {
     }
 }
 
-private class StaticDetector : RegionDetector {
+private class StaticDetector(
+    private val regions: List<CropRegion> = emptyList()
+) : RegionDetector {
     override fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult {
-        return DetectionResult(emptyList(), DetectionMode.FALLBACK_BACKGROUND, DetectionStats(0, 0, 0, 0, 0, 0))
+        return DetectionResult(regions, DetectionMode.FALLBACK_BACKGROUND, DetectionStats(0, 0, regions.size, regions.size, 0, 0))
     }
 }
 

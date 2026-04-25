@@ -17,6 +17,7 @@ import io.github.workflowtool.application.AppController
 import io.github.workflowtool.application.DefaultLayoutConstraintPolicy
 import io.github.workflowtool.application.DefaultLocalizationProvider
 import io.github.workflowtool.application.LayoutSpec
+import io.github.workflowtool.application.PythonThenCppImageEngine
 import io.github.workflowtool.application.ServiceFactory
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.domain.WindowController
@@ -109,7 +110,8 @@ private fun rememberAppController(layoutSpec: LayoutSpec): AppController {
             exporter = ServiceFactory.exporter(),
             layoutSpec = layoutSpec,
             localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            nativeEngine = PythonThenCppImageEngine
         )
     }
 }

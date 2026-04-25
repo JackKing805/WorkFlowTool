@@ -19,6 +19,8 @@ internal interface NativeMagicBridge {
     val isLoaded: Boolean
     val status: String
     fun detectMagicRegion(image: BufferedImage, seedX: Int, seedY: Int, config: DetectionConfig): MagicSelectionResult?
+    fun mergeMagicMasks(current: MagicSelectionPreview, added: MagicSelectionResult, bboxPadding: Int): MergedMagicMask?
+    fun magicMaskContains(mask: BooleanArray, imageWidth: Int, imageHeight: Int, x: Int, y: Int): Boolean
 }
 
 internal object CppDetectorBridge : NativeDetectorBridge, NativeMagicBridge {
@@ -28,7 +30,7 @@ internal object CppDetectorBridge : NativeDetectorBridge, NativeMagicBridge {
         else -> "libcpp_detector.so"
     }
 
-    private val libraryFile = File("native/cpp_detector/build/release/$libraryName")
+    private val libraryFile = AppRuntimeFiles.nativeLibraryFile ?: File("native/cpp_detector/build/release/$libraryName")
 
     private val nativeLibrary: CppDetectorLibrary? by lazy {
         runCatching {
@@ -114,5 +116,48 @@ internal object CppDetectorBridge : NativeDetectorBridge, NativeMagicBridge {
         }.also {
             library.free_magic_result(nativeResult)
         }.getOrNull()
+    }
+
+    override fun mergeMagicMasks(current: MagicSelectionPreview, added: MagicSelectionResult, bboxPadding: Int): MergedMagicMask? {
+        val library = nativeLibrary ?: return null
+        if (!isLoaded) return null
+
+        val currentMask = current.mask.toNativeMask()
+        val addedMask = added.mask.toNativeMask()
+        val nativeResult = NativeMagicResult().apply { write() }
+        currentMask.size()
+        addedMask.size()
+
+        val exitCode = runCatching {
+            library.merge_magic_masks(
+                currentMask,
+                current.mask.size,
+                addedMask,
+                added.mask.size,
+                current.imageWidth,
+                current.imageHeight,
+                bboxPadding,
+                nativeResult
+            )
+        }.getOrElse { return null }
+        if (exitCode != 0) return null
+
+        return runCatching {
+            nativeResult.toMagicSelectionResult()?.let {
+                MergedMagicMask(mask = it.mask, region = it.region, pixelCount = it.pixelCount)
+            }
+        }.also {
+            library.free_magic_result(nativeResult)
+        }.getOrNull()
+    }
+
+    override fun magicMaskContains(mask: BooleanArray, imageWidth: Int, imageHeight: Int, x: Int, y: Int): Boolean {
+        val library = nativeLibrary ?: return false
+        if (!isLoaded) return false
+        val nativeMask = mask.toNativeMask()
+        nativeMask.size()
+        return runCatching {
+            library.magic_mask_contains(nativeMask, mask.size, imageWidth, imageHeight, x, y) == 1
+        }.getOrDefault(false)
     }
 }

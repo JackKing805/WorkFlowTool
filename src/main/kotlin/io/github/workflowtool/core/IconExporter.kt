@@ -5,6 +5,7 @@ import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
+import io.github.workflowtool.model.RegionPoint
 import java.awt.Color
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
@@ -34,8 +35,7 @@ class IconExporter {
                     failures += "${output.fileName} already exists"
                     return@forEachIndexed
                 }
-                val writable = prepareForFormat(processed, config.outputFormat)
-                val written = ImageIO.write(writable, config.outputFormat.imageIoName, output.toFile())
+                val written = writeImage(processed, output, config.outputFormat)
                 if (!written) {
                     failures += "No writer available for ${config.outputFormat.extension}: ${output.fileName}"
                 } else {
@@ -49,12 +49,49 @@ class IconExporter {
         return ExportResult(successCount = success, failureCount = failures.size, failures = failures)
     }
 
+    fun exportSingle(image: BufferedImage, region: CropRegion, config: ExportConfig, output: java.nio.file.Path): Boolean {
+        output.parent?.let(Files::createDirectories)
+        return writeImage(process(crop(image, region), config), output, config.outputFormat)
+    }
+
     private fun crop(image: BufferedImage, region: CropRegion): BufferedImage {
         val x = region.x.coerceIn(0, image.width - 1)
         val y = region.y.coerceIn(0, image.height - 1)
         val width = region.width.coerceAtMost(image.width - x).coerceAtLeast(1)
         val height = region.height.coerceAtMost(image.height - y).coerceAtLeast(1)
-        return image.getSubimage(x, y, width, height)
+        if (region.points.isEmpty()) {
+            return image.getSubimage(x, y, width, height)
+        }
+
+        val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val points = region.points.map {
+            RegionPoint(
+                x = it.x.coerceIn(x, x + width) - x,
+                y = it.y.coerceIn(y, y + height) - y
+            )
+        }
+        for (targetY in 0 until height) {
+            for (targetX in 0 until width) {
+                if (!containsPoint(points, targetX + 0.5f, targetY + 0.5f)) continue
+                output.setRGB(targetX, targetY, image.getRGB(x + targetX, y + targetY))
+            }
+        }
+        return output
+    }
+
+    private fun containsPoint(points: List<RegionPoint>, x: Float, y: Float): Boolean {
+        if (points.size < 3) return false
+        var inside = false
+        var previous = points.last()
+        for (current in points) {
+            val crosses = (current.y > y) != (previous.y > y)
+            if (crosses) {
+                val intersectionX = (previous.x - current.x) * (y - current.y) / (previous.y - current.y).toFloat() + current.x
+                if (x < intersectionX) inside = !inside
+            }
+            previous = current
+        }
+        return inside
     }
 
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {
@@ -126,6 +163,11 @@ class IconExporter {
 
     private fun nextOutputPath(sourceFileName: String, sequence: Int, config: ExportConfig) =
         config.outputDirectory.resolve("${baseName(sourceFileName, sequence, config)}.${config.outputFormat.extension}")
+
+    private fun writeImage(image: BufferedImage, output: java.nio.file.Path, format: ImageFormat): Boolean {
+        val writable = prepareForFormat(image, format)
+        return ImageIO.write(writable, format.imageIoName, output.toFile())
+    }
 
     private fun baseName(sourceFileName: String, sequence: Int, config: ExportConfig): String {
         val padded = sequence.toString().padStart(3, '0')

@@ -1,0 +1,6 @@
+{
+  "status": "trained",
+  "records": 3,
+  "model": "python_detector\\model\\combined\\runs\\weights\\best.pt",
+  "result": "E:\\Projects\\JavaProjects\\WorkFlowTool\\python_detector\\model\\combined\\runs"
+}

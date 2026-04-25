@@ -7,6 +7,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Dp
+import io.github.workflowtool.core.IconExporter
 import io.github.workflowtool.domain.LayoutBounds
 import io.github.workflowtool.domain.LayoutConstraintPolicy
 import io.github.workflowtool.domain.LayoutState
@@ -24,29 +25,24 @@ import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.GridConfig
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
+import io.github.workflowtool.model.RegionPoint
 import io.github.workflowtool.model.SplitSource
 import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.platform.DesktopPlatform
-import java.awt.Color
-import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import javax.imageio.ImageIO
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlin.io.path.exists
-
-data class MagicSelectionPreview(
-    val seedX: Int,
-    val seedY: Int,
-    val regionId: String?,
-    val mask: BooleanArray,
-    val imageWidth: Int,
-    val imageHeight: Int,
-    val pixelCount: Int
-)
 
 class AppController(
     private val detector: RegionDetector,
@@ -55,18 +51,16 @@ class AppController(
     val layoutSpec: LayoutSpec,
     val localization: LocalizationProvider,
     private val layoutPolicy: LayoutConstraintPolicy,
-    private val nativeEngine: NativeImageEngine = CppOnlyNativeImageEngine
+    private val nativeEngine: NativeImageEngine = CppOnlyNativeImageEngine,
+    private val previewExporter: IconExporter = IconExporter()
 ) {
     private val history = EditorHistory()
+    private val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var baseRegions: List<CropRegion> = emptyList()
-    private var lastDetectionResult by mutableStateOf(
-        DetectionResult(
-            regions = baseRegions,
-            mode = DetectionMode.FALLBACK_BACKGROUND,
-            stats = DetectionStats(0, 0, 0, 0, 0, 0)
-        )
-    )
+    private var lastDetectionResult by mutableStateOf(emptyDetectionResult())
+    var busyMessage by mutableStateOf<String?>(null)
+        private set
 
     var imageFile by mutableStateOf<File?>(null)
         private set
@@ -114,6 +108,8 @@ class AppController(
         private set
     var overwriteExisting by mutableStateOf(false)
         private set
+    var continuousTrainingEnabled by mutableStateOf(false)
+        private set
     var showAdvancedSettings by mutableStateOf(false)
         private set
     var previewRegionId by mutableStateOf<String?>(null)
@@ -136,6 +132,7 @@ class AppController(
     val regions: List<CropRegion> get() = history.state.regions
     val canUndo: Boolean get() = history.canUndo
     val canRedo: Boolean get() = history.canRedo
+    val isBusy: Boolean get() = busyMessage != null
     val isNativeSplitAvailable: Boolean get() = nativeEngine.isAvailable
     val selectedRegion: CropRegion? get() = regions.lastOrNull { it.selected }
     val previewRegion: CropRegion? get() = previewRegionId?.let { id -> regions.lastOrNull { it.id == id } }
@@ -157,9 +154,9 @@ class AppController(
     val candidatePixelsLabel: String
         get() = lastDetectionResult.stats.candidatePixels.toString()
     val backgroundEstimateLabel: String
-        get() = "#%08X".format(lastDetectionResult.stats.estimatedBackgroundArgb)
+        get() = formatArgb(lastDetectionResult.stats.estimatedBackgroundArgb)
     val activeBackgroundLabel: String
-        get() = sampledBackgroundArgb?.let { "#%08X".format(it) } ?: "自动"
+        get() = sampledBackgroundArgb?.let(::formatArgb) ?: "自动"
     val detectionBackendLabel: String
         get() = "${nativeEngine.backendName} (${nativeEngine.detail})"
     val hoverPositionLabel: String
@@ -173,30 +170,26 @@ class AppController(
     }
 
     fun applyLayoutBounds(bounds: LayoutBounds) {
-        val next = layoutPolicy.clamp(layoutState, bounds)
-        if (next != layoutState) layoutState = next
+        updateLayoutState(layoutState, bounds)
     }
 
     fun resizeLeftPanel(delta: Dp, bounds: LayoutBounds) {
         if (delta.value == 0f) return
-        val next = layoutPolicy.clamp(layoutState.copy(leftPanelWidth = layoutState.leftPanelWidth + delta), bounds)
-        if (next != layoutState) layoutState = next
+        updateLayoutState(layoutState.copy(leftPanelWidth = layoutState.leftPanelWidth + delta), bounds)
     }
 
     fun resizeRightPanel(delta: Dp, bounds: LayoutBounds) {
         if (delta.value == 0f) return
-        val next = layoutPolicy.clamp(layoutState.copy(rightPanelWidth = layoutState.rightPanelWidth - delta), bounds)
-        if (next != layoutState) layoutState = next
+        updateLayoutState(layoutState.copy(rightPanelWidth = layoutState.rightPanelWidth - delta), bounds)
     }
 
     fun resizePreview(delta: Dp, bounds: LayoutBounds) {
         if (delta.value == 0f) return
-        val next = layoutPolicy.clamp(layoutState.copy(previewHeight = layoutState.previewHeight + delta), bounds)
-        if (next != layoutState) layoutState = next
+        updateLayoutState(layoutState.copy(previewHeight = layoutState.previewHeight + delta), bounds)
     }
 
     fun chooseImageFile() {
-        DesktopPlatform.chooseImageFile()?.let(::loadFile)
+        DesktopPlatform.chooseImageFile()?.let(::loadFileAsync)
     }
 
     fun chooseOutputDirectory() {
@@ -219,17 +212,34 @@ class AppController(
             backgroundPickArmed = false
             magicSelectionPreview = null
             log("图片加载成功：${file.name}，${loaded.width} x ${loaded.height}")
-            rebuildFromAuto(logResult = true)
+            regenerateBaseSafely(logResult = true)
         }.onFailure {
             log("图片加载失败：${it.message}")
         }
     }
 
+    fun loadFileAsync(file: File) {
+        runBusy("正在导入并识别图片...") {
+            loadFile(file)
+        }
+    }
+
     fun rebuildFromAuto(logResult: Boolean = false) {
         val loaded = image ?: return
+        val file = imageFile
         val detected = detector.detect(loaded, effectiveDetectionConfig())
         lastDetectionResult = detected
         applyBaseGeneration(SplitSource.AutoDetect, detected.regions, logResult, "自动识别")
+        if (continuousTrainingEnabled && file != null && regions.any { it.visible }) {
+            appendTrainingSample(file, "自动识别")
+            retrainContinuousModel()
+        }
+    }
+
+    fun rebuildFromAutoAsync(logResult: Boolean = false) {
+        runBusy("正在自动识别区域...") {
+            rebuildFromAuto(logResult)
+        }
     }
 
     fun rebuildFromSmartGrid(logResult: Boolean = false) {
@@ -243,10 +253,19 @@ class AppController(
         applyBaseGeneration(SplitSource.SmartGrid, generated, logResult, "智能网格")
     }
 
+    fun rebuildFromSmartGridAsync(logResult: Boolean = false) {
+        runBusy("正在智能拆分区域...") {
+            rebuildFromSmartGrid(logResult)
+        }
+    }
+
     fun regenerateBase() {
-        when (splitSource) {
-            SplitSource.AutoDetect -> rebuildFromAuto(logResult = true)
-            SplitSource.SmartGrid -> rebuildFromSmartGrid(logResult = true)
+        regenerateBaseSafely(logResult = true)
+    }
+
+    fun regenerateBaseAsync() {
+        runBusy("正在重新生成区域...") {
+            regenerateBase()
         }
     }
 
@@ -289,7 +308,7 @@ class AppController(
     }
 
     private fun applyBaseGeneration(source: SplitSource, generated: List<CropRegion>, logResult: Boolean, sourceLabel: String) {
-        val normalized = normalizeRegionIds(generated)
+        val normalized = normalizeRegionIds(generated).mapNotNull { clampRegionToImage(it) }
         if (source == splitSource && normalized == baseRegions && !hasManualEdits) return
         splitSource = source
         baseRegions = normalized
@@ -319,6 +338,10 @@ class AppController(
         log("裁剪完成：成功 ${result.successCount} 个，失败 ${result.failureCount} 个")
         result.failures.take(3).forEach { log("失败：$it") }
         log("输出目录：$outputDirectory")
+        if (continuousTrainingEnabled && result.successCount > 0) {
+            appendTrainingSample(file, "导出确认")
+            retrainContinuousModel()
+        }
     }
 
     fun exportPreviewRegion(regionId: String, targetPath: Path? = null) {
@@ -348,12 +371,8 @@ class AppController(
         }
 
         runCatching {
-            destination.parent?.let(Files::createDirectories)
             val config = buildExportConfig()
-            val cropped = cropRegionImage(loaded, region)
-            val processed = processPreviewImage(cropped, config)
-            val writable = prepareImageForFormat(processed, config.outputFormat)
-            val written = ImageIO.write(writable, config.outputFormat.imageIoName, destination.toFile())
+            val written = previewExporter.exportSingle(loaded, region, config, destination)
             check(written) { "No writer available for ${config.outputFormat.extension}" }
         }.onSuccess {
             log("预览区域已导出：${destination.fileName}")
@@ -382,7 +401,7 @@ class AppController(
         val loaded = image ?: return
         val x = point.x.toInt()
         val y = point.y.toInt()
-        val result = detectMagicRegion(loaded, x, y, detectionConfig.copy(colorDistanceThreshold = magicTolerance))
+        val result = detectMagicAt(loaded, x, y)
         if (result == null) {
             magicSelectionPreview = null
             log("Magic selection found no usable region at ($x, $y)")
@@ -390,37 +409,37 @@ class AppController(
         }
         val targetRegion = findMagicReplaceTarget(x, y)
         val created = result.region
-        val updatedRegions = if (targetRegion != null) {
-            regions.map { region ->
-                when {
-                    region.id == targetRegion.id -> created.copy(
-                        id = targetRegion.id,
-                        visible = targetRegion.visible,
-                        selected = true
-                    )
-                    region.selected -> region.copy(selected = false)
-                    else -> region
-                }
-            }
-        } else {
-            regions.map { it.copy(selected = false) } + created
-        }
-        replaceRegions("Magic selection", updatedRegions)
-        val regionId = targetRegion?.id ?: regions.lastOrNull()?.id
-        magicSelectionPreview = MagicSelectionPreview(
-            seedX = result.seedX,
-            seedY = result.seedY,
-            regionId = regionId,
-            mask = result.mask,
-            imageWidth = result.imageWidth,
-            imageHeight = result.imageHeight,
-            pixelCount = result.pixelCount
-        )
+        val regionId = replaceOrAppendMagicRegion("Magic selection", created, targetRegion)
+        magicSelectionPreview = result.toPreview(regionId)
         if (targetRegion != null) {
             log("Magic selection refreshed ${created.width} x ${created.height} at ($x, $y), tolerance=$magicTolerance")
         } else {
             log("Magic selection created ${created.width} x ${created.height} at ($x, $y), tolerance=$magicTolerance")
         }
+    }
+
+    fun exportRegionsAsync() {
+        runBusy("正在裁剪导出...") {
+            exportRegions()
+        }
+    }
+
+    fun extendMagicSelection(point: Offset) {
+        val loaded = image ?: return
+        val preview = magicSelectionPreview ?: run {
+            applyMagicSelection(point)
+            return
+        }
+        val x = point.x.toInt()
+        val y = point.y.toInt()
+        if (x !in 0 until loaded.width || y !in 0 until loaded.height) return
+        if (magicMaskContains(preview, x, y)) return
+
+        val result = detectMagicAt(loaded, x, y) ?: return
+        val merged = mergeMagicMasks(preview, result, detectionConfig.bboxPadding) ?: return
+        val existing = preview.regionId?.let { targetId -> regions.firstOrNull { it.id == targetId } }
+        val regionId = replaceOrAppendMagicRegion("Magic selection extend", merged.region, existing, trackHistory = false)
+        magicSelectionPreview = merged.toPreview(x, y, regionId, preview)
     }
 
     fun updateMagicTolerance(next: Int) {
@@ -635,6 +654,12 @@ class AppController(
         overwriteExisting = next
     }
 
+    fun updateContinuousTrainingEnabled(next: Boolean) {
+        if (continuousTrainingEnabled == next) return
+        continuousTrainingEnabled = next
+        log(if (next) "持续学习已开启：识别和导出确认后的区域会更新训练集并重训模型" else "持续学习已关闭")
+    }
+
     fun showAdvancedSettings(show: Boolean) {
         if (showAdvancedSettings == show) return
         showAdvancedSettings = show
@@ -667,6 +692,23 @@ class AppController(
         )
     }
 
+    private fun runBusy(message: String, action: () -> Unit) {
+        if (isBusy) {
+            log("已有任务执行中：$message")
+            return
+        }
+        busyMessage = message
+        workerScope.launch {
+            try {
+                action()
+            } catch (error: Throwable) {
+                log("任务失败：${error.message ?: error::class.simpleName}")
+            } finally {
+                busyMessage = null
+            }
+        }
+    }
+
     private fun syncManualEdits() {
         hasManualEdits = normalizeRegionIds(regions) != baseRegions
     }
@@ -675,47 +717,95 @@ class AppController(
         return input.mapIndexed { index, region -> region.copy(id = (index + 1).toString()) }
     }
 
+    private fun regenerateBaseSafely(logResult: Boolean) {
+        runCatching {
+            when (splitSource) {
+                SplitSource.AutoDetect -> rebuildFromAuto(logResult = logResult)
+                SplitSource.SmartGrid -> rebuildFromSmartGrid(logResult = logResult)
+            }
+        }.onFailure {
+            lastDetectionResult = emptyDetectionResult()
+            applyBaseGeneration(splitSource, emptyList(), false, baseSourceLabel)
+            log("图片已导入，但自动识别失败：${it.message ?: it::class.simpleName}")
+        }
+    }
+
+    private fun updateLayoutState(nextState: LayoutState, bounds: LayoutBounds) {
+        val next = layoutPolicy.clamp(nextState, bounds)
+        if (next != layoutState) layoutState = next
+    }
+
+    private fun clampRegionToImage(region: CropRegion): CropRegion? {
+        val loaded = image ?: return region
+        val x = region.x.coerceIn(0, (loaded.width - 1).coerceAtLeast(0))
+        val y = region.y.coerceIn(0, (loaded.height - 1).coerceAtLeast(0))
+        val right = region.right.coerceIn(x + 1, loaded.width)
+        val bottom = region.bottom.coerceIn(y + 1, loaded.height)
+        val width = right - x
+        val height = bottom - y
+        if (width <= 0 || height <= 0) return null
+        return region.copy(
+            x = x,
+            y = y,
+            width = width,
+            height = height,
+            points = region.points.map {
+                RegionPoint(
+                    x = it.x.coerceIn(0, loaded.width),
+                    y = it.y.coerceIn(0, loaded.height)
+                )
+            }
+        )
+    }
+
     private fun refreshMagicSelectionPreview() {
         if (toolMode != ToolMode.Magic) return
         val preview = magicSelectionPreview ?: return
         val loaded = image ?: return
-        val result = detectMagicRegion(
-            loaded,
-            preview.seedX,
-            preview.seedY,
-            detectionConfig.copy(colorDistanceThreshold = magicTolerance)
-        ) ?: run {
+        val result = detectMagicAt(loaded, preview.seedX, preview.seedY) ?: run {
             magicSelectionPreview = null
             return
         }
 
         val existing = preview.regionId?.let { targetId -> regions.firstOrNull { it.id == targetId } }
-        val nextRegion = result.region.copy(
-            id = existing?.id ?: result.region.id,
+        val regionId = replaceOrAppendMagicRegion("Magic selection preview", result.region, existing, trackHistory = false)
+        magicSelectionPreview = result.toPreview(regionId)
+    }
+
+    private fun detectMagicAt(loaded: BufferedImage, x: Int, y: Int): MagicSelectionResult? {
+        return detectMagicRegion(
+            loaded,
+            x,
+            y,
+            detectionConfig.copy(colorDistanceThreshold = magicTolerance)
+        )
+    }
+
+    private fun replaceOrAppendMagicRegion(
+        label: String,
+        region: CropRegion,
+        existing: CropRegion?,
+        trackHistory: Boolean = true
+    ): String {
+        val regionId = existing?.id ?: (regions.size + 1).toString()
+        val nextRegion = region.copy(
+            id = regionId,
             visible = existing?.visible ?: true,
             selected = true
         )
         val updatedRegions = if (existing != null) {
-            regions.map { region ->
+            regions.map { current ->
                 when {
-                    region.id == existing.id -> nextRegion
-                    region.selected -> region.copy(selected = false)
-                    else -> region
+                    current.id == existing.id -> nextRegion
+                    current.selected -> current.copy(selected = false)
+                    else -> current
                 }
             }
         } else {
             regions.map { it.copy(selected = false) } + nextRegion
         }
-        replaceRegions("Magic selection preview", updatedRegions, trackHistory = false)
-        magicSelectionPreview = MagicSelectionPreview(
-            seedX = result.seedX,
-            seedY = result.seedY,
-            regionId = nextRegion.id,
-            mask = result.mask,
-            imageWidth = result.imageWidth,
-            imageHeight = result.imageHeight,
-            pixelCount = result.pixelCount
-        )
+        replaceRegions(label, updatedRegions, trackHistory = trackHistory)
+        return regionId
     }
 
     private fun focusRegion(region: CropRegion, fit: Boolean) {
@@ -742,17 +832,9 @@ class AppController(
         if (viewport.width <= 0f || viewport.height <= 0f) return
     }
 
-    private fun ensureNativeSplitAvailable(): Boolean {
-        if (nativeEngine.isAvailable) return true
-        log("C++ 检测后端不可用：${nativeEngine.detail}")
-        return false
-    }
-
     private fun findMagicReplaceTarget(x: Int, y: Int): CropRegion? {
-        val previewRegionId = magicSelectionPreview?.regionId ?: return null
         return regions.lastOrNull { region ->
-            region.id == previewRegionId &&
-                region.visible &&
+            region.visible &&
                 x in region.x until region.right &&
                 y in region.y until region.bottom
         }
@@ -765,87 +847,97 @@ class AppController(
             manualBackgroundArgb = background ?: 0
         )
     }
+
+    private fun appendTrainingSample(sourceFile: File, sourceLabel: String) {
+        val visibleRegions = regions.filter { it.visible }
+        if (visibleRegions.isEmpty()) return
+        runCatching {
+            val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback")
+            val imagesDir = datasetRoot.resolve("images")
+            Files.createDirectories(imagesDir)
+            val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))
+            val extension = sourceFile.extension.ifBlank { "png" }
+            val targetName = "${timestamp}_${sourceFile.nameWithoutExtension}.${extension}"
+            val target = imagesDir.resolve(targetName)
+            Files.copy(sourceFile.toPath(), target, StandardCopyOption.REPLACE_EXISTING)
+            val line = buildTrainingJsonLine("images/$targetName", visibleRegions)
+            Files.writeString(
+                datasetRoot.resolve("annotations.jsonl"),
+                line + System.lineSeparator(),
+                Charsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND
+            )
+            log("持续学习样本已记录：$sourceLabel，${visibleRegions.size} 个区域")
+        }.onFailure {
+            log("持续学习样本记录失败：${it.message}")
+        }
+    }
+
+    private fun retrainContinuousModel() {
+        runCatching {
+            busyMessage = "正在用本次结果更新模型..."
+            val makeDataset = runPythonCommand("make_training_set.py")
+            check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
+            val train = runPythonCommand(
+                "train_icon_detector.py",
+                "--dataset",
+                "training_sets/combined",
+                "--out",
+                "model/combined",
+                "--epochs",
+                "3",
+                "--imgsz",
+                "640",
+                "--batch",
+                "2"
+            )
+            check(train.exitCode == 0) { train.output.ifBlank { "模型训练失败" } }
+            log("持续学习模型已更新，下次识别会使用新模型")
+        }.onFailure {
+            log("持续学习模型更新失败：${it.message}")
+        }
+    }
+
+    private fun runPythonCommand(vararg args: String): ProcessResult {
+        val process = ProcessBuilder(listOf("python") + args)
+            .directory(AppRuntimeFiles.pythonDir.toFile())
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader(Charsets.UTF_8).readText()
+        return ProcessResult(process.waitFor(), output)
+    }
+
     private fun suggestedPreviewFileName(file: File, region: CropRegion): String {
         val base = file.nameWithoutExtension.ifBlank { "preview" }
         return "${base}_region_${region.id}.${outputFormat.extension}"
     }
 
-    private fun cropRegionImage(image: BufferedImage, region: CropRegion): BufferedImage {
-        val x = region.x.coerceIn(0, image.width - 1)
-        val y = region.y.coerceIn(0, image.height - 1)
-        val width = region.width.coerceAtMost(image.width - x).coerceAtLeast(1)
-        val height = region.height.coerceAtMost(image.height - y).coerceAtLeast(1)
-        return image.getSubimage(x, y, width, height)
-    }
-
-    private fun processPreviewImage(input: BufferedImage, config: ExportConfig): BufferedImage {
-        var current = if (config.trimTransparentPadding) trimTransparentImage(input) else copyImage(input)
-        if (config.padToSquare) current = padImageToSquare(current)
-        config.fixedSize?.takeIf { it > 0 && !config.keepOriginalSize }?.let { size ->
-            current = resizeImage(current, size, size)
-        }
-        return current
-    }
-
-    private fun copyImage(input: BufferedImage): BufferedImage {
-        val output = BufferedImage(input.width, input.height, BufferedImage.TYPE_INT_ARGB)
-        val graphics = output.createGraphics()
-        graphics.drawImage(input, 0, 0, null)
-        graphics.dispose()
-        return output
-    }
-
-    private fun trimTransparentImage(input: BufferedImage): BufferedImage {
-        var minX = input.width
-        var minY = input.height
-        var maxX = -1
-        var maxY = -1
-        for (y in 0 until input.height) {
-            for (x in 0 until input.width) {
-                val alpha = input.getRGB(x, y) ushr 24
-                if (alpha > 0) {
-                    minX = minOf(minX, x)
-                    minY = minOf(minY, y)
-                    maxX = maxOf(maxX, x)
-                    maxY = maxOf(maxY, y)
-                }
-            }
-        }
-        if (maxX < minX || maxY < minY) return copyImage(input)
-        return copyImage(input.getSubimage(minX, minY, maxX - minX + 1, maxY - minY + 1))
-    }
-
-    private fun padImageToSquare(input: BufferedImage): BufferedImage {
-        val size = maxOf(input.width, input.height)
-        val output = BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB)
-        val graphics = output.createGraphics()
-        graphics.drawImage(input, (size - input.width) / 2, (size - input.height) / 2, null)
-        graphics.dispose()
-        return output
-    }
-
-    private fun resizeImage(input: BufferedImage, width: Int, height: Int): BufferedImage {
-        val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val graphics = output.createGraphics()
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
-        graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        graphics.drawImage(input, 0, 0, width, height, null)
-        graphics.dispose()
-        return output
-    }
-
-    private fun prepareImageForFormat(input: BufferedImage, format: ImageFormat): BufferedImage {
-        if (format == ImageFormat.PNG || format == ImageFormat.WEBP) return input
-        val output = BufferedImage(input.width, input.height, BufferedImage.TYPE_INT_RGB)
-        val graphics = output.createGraphics()
-        graphics.color = Color.WHITE
-        graphics.fillRect(0, 0, output.width, output.height)
-        graphics.drawImage(input, 0, 0, null)
-        graphics.dispose()
-        return output
-    }
 }
 
 private operator fun Offset.times(scale: Float): Offset = Offset(x * scale, y * scale)
 
 private operator fun Offset.div(scale: Float): Offset = Offset(x / scale, y / scale)
+
+private data class ProcessResult(val exitCode: Int, val output: String)
+
+private fun formatArgb(value: Int): String = "#%08X".format(value)
+
+private fun buildTrainingJsonLine(imagePath: String, regions: List<CropRegion>): String {
+    val boxes = regions.joinToString(",") { region ->
+        """{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}"""
+    }
+    return """{"image":"${escapeJson(imagePath)}","regions":[$boxes]}"""
+}
+
+private fun escapeJson(value: String): String =
+    value.flatMap { char ->
+        when (char) {
+            '\\' -> listOf('\\', '\\')
+            '"' -> listOf('\\', '"')
+            '\n' -> listOf('\\', 'n')
+            '\r' -> listOf('\\', 'r')
+            '\t' -> listOf('\\', 't')
+            else -> listOf(char)
+        }
+    }.joinToString("")

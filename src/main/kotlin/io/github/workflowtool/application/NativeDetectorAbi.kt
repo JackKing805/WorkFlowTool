@@ -33,6 +33,24 @@ internal interface CppDetectorLibrary : Library {
         config: NativeDetectionConfig,
         result: NativeMagicResult
     ): Int
+    fun merge_magic_masks(
+        currentMask: Pointer,
+        currentLength: Int,
+        addedMask: Pointer,
+        addedLength: Int,
+        width: Int,
+        height: Int,
+        bboxPadding: Int,
+        result: NativeMagicResult
+    ): Int
+    fun magic_mask_contains(
+        mask: Pointer,
+        maskLength: Int,
+        width: Int,
+        height: Int,
+        x: Int,
+        y: Int
+    ): Int
 
     fun free_detection_result(result: NativeDetectionResult)
     fun free_magic_result(result: NativeMagicResult)
@@ -222,6 +240,13 @@ internal fun BufferedImage.toNativeImageBuffer(): Pair<NativeImageBuffer, Memory
     val buffer = NativeImageBuffer(width, height, memory)
     buffer.write()
     return buffer to memory
+}
+
+internal fun BooleanArray.toNativeMask(): Memory {
+    val memory = Memory(size.toLong())
+    val bytes = ByteArray(size) { index -> if (this[index]) 1 else 0 }
+    memory.write(0, bytes, 0, bytes.size)
+    return memory
 }
 
 internal fun NativeDetectionResult.toDomainResult(): DetectionResult {

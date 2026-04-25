@@ -3,4 +3,9 @@ build/
 out/
 *.iml
 .idea/
-
+**/build
+python_detector/.ultralytics
+native/cpp_detector/build
+.kotlin
+.idea
+.gradle

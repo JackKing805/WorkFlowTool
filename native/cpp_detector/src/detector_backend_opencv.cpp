@@ -23,6 +23,22 @@ static cv::Mat build_bgra_image(const NativeImageBuffer& image) {
     return bgra;
 }
 
+static cv::Mat build_bgr_image(const NativeImageBuffer& image) {
+    cv::Mat bgr(image.height, image.width, CV_8UC3);
+    for (int y = 0; y < image.height; ++y) {
+        auto* row = bgr.ptr<cv::Vec3b>(y);
+        for (int x = 0; x < image.width; ++x) {
+            const int32_t argb = image.pixels[idx(x, y, image.width)];
+            row[x] = cv::Vec3b(
+                static_cast<uint8_t>(blue(argb)),
+                static_cast<uint8_t>(green(argb)),
+                static_cast<uint8_t>(red(argb))
+            );
+        }
+    }
+    return bgr;
+}
+
 static cv::Mat build_alpha_mask(const NativeImageBuffer& image, int alpha_threshold, int& candidates) {
     cv::Mat mask(image.height, image.width, CV_8UC1, cv::Scalar(0));
     candidates = 0;
@@ -93,7 +109,13 @@ static std::vector<RegionWork> regions_from_components(const cv::Mat& mask, cons
             if (width < config.min_width || height < config.min_height || area < config.min_pixel_area) continue;
         }
         const int pad = std::max(0, config.bbox_padding);
-        regions.push_back({std::max(0, left - pad), std::max(0, top - pad), width + pad * 2, height + pad * 2, area});
+        cv::Rect padded = clamp_rect(
+            cv::Rect(left - pad, top - pad, width + pad * 2, height + pad * 2),
+            mask.cols,
+            mask.rows
+        );
+        if (padded.width <= 0 || padded.height <= 0) continue;
+        regions.push_back({padded.x, padded.y, padded.width, padded.height, area});
     }
     if (connected) *connected = std::max(0, components - 1);
     return regions;
@@ -231,16 +253,15 @@ int32_t opencv_detect_magic_region(const NativeImageBuffer* image, int32_t seed_
         const int32_t seed_argb = image->pixels[idx(seed_x, seed_y, image->width)];
         if (matches_background(seed_argb, background, *config)) return 0;
 
-        cv::Mat bgra = build_bgra_image(*image);
+        cv::Mat bgr = build_bgr_image(*image);
         cv::Mat floodMask(image->height + 2, image->width + 2, CV_8UC1, cv::Scalar(0));
-        const cv::Scalar seedColor = bgra.at<cv::Vec4b>(seed_y, seed_x);
+        const cv::Scalar seedColor = bgr.at<cv::Vec3b>(seed_y, seed_x);
         const int tol = std::max(1, config->color_distance_threshold);
-        const int alphaTol = std::max(8, config->alpha_threshold * 3);
-        const cv::Scalar loDiff(tol, tol, tol, alphaTol);
-        const cv::Scalar upDiff(tol, tol, tol, alphaTol);
+        const cv::Scalar loDiff(tol, tol, tol);
+        const cv::Scalar upDiff(tol, tol, tol);
         cv::Rect rect;
         const int flags = 8 | cv::FLOODFILL_MASK_ONLY | cv::FLOODFILL_FIXED_RANGE | (255 << 8);
-        cv::floodFill(bgra, floodMask, cv::Point(seed_x, seed_y), seedColor, &rect, loDiff, upDiff, flags);
+        cv::floodFill(bgr, floodMask, cv::Point(seed_x, seed_y), seedColor, &rect, loDiff, upDiff, flags);
 
         cv::Mat regionMask = floodMask(cv::Rect(1, 1, image->width, image->height)).clone();
         regionMask = refine_mask(regionMask, *config);

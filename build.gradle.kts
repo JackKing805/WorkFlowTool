@@ -70,6 +70,32 @@ tasks.test {
     useJUnitPlatform()
 }
 
+tasks.processResources {
+    from("python_detector") {
+        into("python_detector")
+        include("detect_icons.py")
+        include("make_training_set.py")
+        include("train_icon_detector.py")
+        include("README.md")
+        include("model/combined/runs/weights/best.pt")
+        include("training_sets/test_actions/annotations.jsonl")
+        include("training_sets/combined/annotations.jsonl")
+    }
+    from("test.png") {
+        into("python_detector/seed_images")
+    }
+    from("xunlian/icons.png") {
+        into("python_detector/seed_images")
+    }
+    from("xunlian/icons2.png") {
+        into("python_detector/seed_images")
+    }
+    from(cppReleaseDir) {
+        into("native")
+        include(cppLibraryName)
+    }
+}
+
 val buildNativeDetector = providers.gradleProperty("buildNativeDetector").map(String::toBoolean).orElse(false)
 
 tasks.matching { it.name in setOf("test", "run", "createDistributable", "packageDistributionForCurrentOS") }.configureEach {

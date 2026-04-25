@@ -53,6 +53,9 @@ endfunction()
 
 add_library(cpp_detector SHARED ${CPP_DETECTOR_SOURCES})
 target_include_directories(cpp_detector PRIVATE src)
+if (MSVC)
+    set_property(TARGET cpp_detector PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 if (CPP_DETECTOR_ENABLE_OPENCV)
     if (EXISTS "${CPP_DETECTOR_OPENCV_SOURCE_DIR}/CMakeLists.txt")
@@ -61,7 +64,13 @@ if (CPP_DETECTOR_ENABLE_OPENCV)
         add_subdirectory("${CPP_DETECTOR_OPENCV_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/opencv" EXCLUDE_FROM_ALL)
         set(OpenCV_FOUND TRUE)
         set(OpenCV_LIBS opencv_core opencv_imgproc)
-        set(OpenCV_INCLUDE_DIRS "${CPP_DETECTOR_OPENCV_SOURCE_DIR}/include")
+        set(OpenCV_INCLUDE_DIRS
+            "${CPP_DETECTOR_OPENCV_SOURCE_DIR}/include"
+            "${CPP_DETECTOR_OPENCV_SOURCE_DIR}/modules/core/include"
+            "${CPP_DETECTOR_OPENCV_SOURCE_DIR}/modules/imgproc/include"
+            "${CMAKE_BINARY_DIR}/opencv"
+            "${CMAKE_BINARY_DIR}"
+        )
     elseif (CPP_DETECTOR_FETCH_OPENCV)
         message(STATUS "workflowtool_cpp_detector: fetching bundled OpenCV ${CPP_DETECTOR_OPENCV_VERSION}")
         workflowtool_configure_embedded_opencv()
@@ -73,7 +82,13 @@ if (CPP_DETECTOR_ENABLE_OPENCV)
         FetchContent_MakeAvailable(opencv)
         set(OpenCV_FOUND TRUE)
         set(OpenCV_LIBS opencv_core opencv_imgproc)
-        set(OpenCV_INCLUDE_DIRS "${opencv_SOURCE_DIR}/include")
+        set(OpenCV_INCLUDE_DIRS
+            "${opencv_SOURCE_DIR}/include"
+            "${opencv_SOURCE_DIR}/modules/core/include"
+            "${opencv_SOURCE_DIR}/modules/imgproc/include"
+            "${opencv_BINARY_DIR}"
+            "${CMAKE_BINARY_DIR}"
+        )
     else()
         find_package(OpenCV QUIET COMPONENTS core imgproc)
     endif()

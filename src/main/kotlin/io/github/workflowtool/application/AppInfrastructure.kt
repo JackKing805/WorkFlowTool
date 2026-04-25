@@ -28,11 +28,7 @@ import java.awt.image.BufferedImage
 abstract class BaseRegionDetector : RegionDetector {
     final override fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult {
         if (image.width <= 0 || image.height <= 0) {
-            return DetectionResult(
-                regions = emptyList(),
-                mode = DetectionMode.FALLBACK_BACKGROUND,
-                stats = DetectionStats(0, 0, 0, 0, 0, 0)
-            )
+            return emptyDetectionResult()
         }
         return doDetect(image, config)
     }
@@ -65,18 +61,26 @@ class CppRegionDetector(
     private val bridge: NativeDetectorBridge = CppDetectorBridge
 ) : BaseRegionDetector() {
     override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
-        return bridge.detect(image, config) ?: DetectionResult(
-            regions = emptyList(),
-            mode = DetectionMode.FALLBACK_BACKGROUND,
-            stats = DetectionStats(0, 0, 0, 0, 0, 0)
-        )
+        return bridge.detect(image, config) ?: emptyDetectionResult()
     }
 }
 
-class CppNativeImageEngine : NativeImageEngine {
-    override val isAvailable: Boolean = CppDetectorBridge.isLoaded
-    override val backendName: String = "C++"
-    override val detail: String = CppDetectorBridge.status
+class PythonRegionDetector : BaseRegionDetector() {
+    override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
+        return PythonDetectorBridge.detect(image, config) ?: emptyDetectionResult()
+    }
+}
+
+class CompositeRegionDetector(
+    private vararg val detectors: RegionDetector
+) : BaseRegionDetector() {
+    override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
+        for (detector in detectors) {
+            val result = detector.detect(image, config)
+            if (result.regions.isNotEmpty()) return result
+        }
+        return emptyDetectionResult()
+    }
 }
 
 class CppRegionSplitter(
@@ -109,6 +113,14 @@ object CppOnlyNativeImageEngine : NativeImageEngine {
     override val backendName: String = "C++"
     override val detail: String
         get() = CppDetectorBridge.status
+}
+
+object PythonThenCppImageEngine : NativeImageEngine {
+    override val isAvailable: Boolean
+        get() = PythonDetectorBridge.isAvailable || CppDetectorBridge.isLoaded
+    override val backendName: String = "Python + C++"
+    override val detail: String
+        get() = "${PythonDetectorBridge.status}; ${CppDetectorBridge.status}"
 }
 
 object DefaultLocalizationProvider : LocalizationProvider {
@@ -251,7 +263,7 @@ class EditorHistory(initialRegions: List<CropRegion> = emptyList()) {
     fun redo() {
         val command = redoStack.removeLastOrNull() ?: return
         state = command.execute(state)
-        redoStack.addLast(command)
+        undoStack.addLast(command)
     }
 }
 
@@ -269,9 +281,16 @@ data class LayoutSpec(
 )
 
 object ServiceFactory {
-    fun detector(nativeEngine: NativeImageEngine = CppNativeImageEngine()): RegionDetector = CppRegionDetector()
+    fun detector(): RegionDetector = CompositeRegionDetector(PythonRegionDetector(), CppRegionDetector())
 
     fun splitter(): RegionSplitter = CppRegionSplitter()
 
-    fun exporter(nativeEngine: NativeImageEngine = UnavailableNativeImageEngine): RegionExporter = JvmRegionExporter()
+    fun exporter(): RegionExporter = JvmRegionExporter()
 }
+
+internal fun emptyDetectionResult(): DetectionResult =
+    DetectionResult(
+        regions = emptyList(),
+        mode = DetectionMode.FALLBACK_BACKGROUND,
+        stats = DetectionStats(0, 0, 0, 0, 0, 0)
+    )

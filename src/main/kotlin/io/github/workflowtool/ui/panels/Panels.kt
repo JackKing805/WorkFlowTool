@@ -119,14 +119,14 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 GhostButton(
                     strings.text(StringKey.AutoMode),
-                    { controller.rebuildFromAuto(logResult = true) },
+                    { controller.rebuildFromAutoAsync(logResult = true) },
                     active = controller.splitSource == io.github.workflowtool.model.SplitSource.AutoDetect,
                     enabled = controller.isNativeSplitAvailable,
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
                 GhostButton(
                     strings.text(StringKey.GridMode),
-                    { controller.rebuildFromSmartGrid(logResult = true) },
+                    { controller.rebuildFromSmartGridAsync(logResult = true) },
                     active = controller.splitSource == io.github.workflowtool.model.SplitSource.SmartGrid,
                     enabled = controller.isNativeSplitAvailable,
                     modifier = Modifier.weight(1f).height(38.dp)
@@ -167,7 +167,7 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(14.dp))
             GhostButton(
                 strings.text(StringKey.Regenerate),
-                controller::regenerateBase,
+                controller::regenerateBaseAsync,
                 enabled = controller.isNativeSplitAvailable,
                 modifier = Modifier.fillMaxWidth().height(38.dp)
             )
@@ -348,7 +348,7 @@ fun RightPanel(controller: AppController, modifier: Modifier = Modifier) {
             }
         }
         PanelCard(strings.text(StringKey.ProcessTitle), Modifier.fillMaxWidth().height(252.dp)) {
-            PrimaryButton(strings.text(StringKey.StartCrop), controller::exportRegions)
+            PrimaryButton(strings.text(StringKey.StartCrop), controller::exportRegionsAsync)
             Spacer(Modifier.height(16.dp))
             GhostButton("高级 ${strings.text(StringKey.AdvancedSettings)}", { controller.showAdvancedSettings(true) }, modifier = Modifier.fillMaxWidth().height(38.dp))
             Spacer(Modifier.weight(1f))
@@ -370,6 +370,8 @@ fun AdvancedSettingsDialog(controller: AppController) {
                 Text(strings.text(StringKey.FixedSize), color = Color.White, fontSize = 13.sp)
                 CompactTextField(controller.fixedSizeText, controller::updateFixedSizeText, suffix = "px")
                 SmallCheck(strings.text(StringKey.OverwriteExisting), controller.overwriteExisting, controller::updateOverwriteExisting)
+                SmallCheck("持续学习训练集", controller.continuousTrainingEnabled, controller::updateContinuousTrainingEnabled)
+                Text("开启后，识别和导出确认的区域会追加到训练集，并自动训练为下一次识别使用的新模型。", color = TextDim, fontSize = 12.sp)
             }
         },
         confirmButton = {

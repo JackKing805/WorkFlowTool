@@ -127,6 +127,8 @@ long long elapsed_ms(std::chrono::steady_clock::time_point start);
 int32_t builtin_detect_icons(const NativeImageBuffer* image, const NativeDetectionConfig* config, NativeDetectionResult* result);
 int32_t builtin_split_grid(const NativeImageBuffer* image, const NativeGridConfig* config, NativeDetectionResult* result);
 int32_t builtin_detect_magic_region(const NativeImageBuffer* image, int32_t seed_x, int32_t seed_y, const NativeDetectionConfig* config, NativeMagicResult* result);
+int32_t merge_magic_masks_impl(const uint8_t* current_mask, int32_t current_length, const uint8_t* added_mask, int32_t added_length, int32_t width, int32_t height, int32_t bbox_padding, NativeMagicResult* result);
+int32_t magic_mask_contains_impl(const uint8_t* mask, int32_t mask_length, int32_t width, int32_t height, int32_t x, int32_t y);
 
 #ifdef CPP_DETECTOR_USE_OPENCV
 int32_t opencv_detect_icons(const NativeImageBuffer* image, const NativeDetectionConfig* config, NativeDetectionResult* result);
