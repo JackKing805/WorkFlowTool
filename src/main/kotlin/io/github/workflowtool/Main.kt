@@ -20,6 +20,7 @@ import io.github.workflowtool.application.DefaultLocalizationProvider
 import io.github.workflowtool.application.LayoutSpec
 import io.github.workflowtool.application.PythonThenCppImageEngine
 import io.github.workflowtool.application.ServiceFactory
+import io.github.workflowtool.application.loadFilesAsync
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.domain.WindowController
 import io.github.workflowtool.ui.IconCropperApp
