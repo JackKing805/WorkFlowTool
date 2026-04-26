@@ -113,8 +113,11 @@ def detect(args):
     image = Image.open(args.image).convert("RGBA")
     width, height = image.size
     pixels = image.load()
+    edge = max(1, min(args.edge_sample_width, max(1, min(width, height) // 2)))
+    background = estimate_background(pixels, width, height, edge)
     model_regions = [] if args.disable_model else detect_with_model(args, width, height)
     if model_regions:
+        model_regions = [attach_points(region, pixels, width, height, background, args) for region in model_regions]
         return {
             "mode": "python_yolo_model",
             "regions": model_regions,
@@ -141,8 +144,6 @@ def detect(args):
                 "totalTimeMs": int((perf_counter() - started) * 1000),
             },
         }
-    edge = max(1, min(args.edge_sample_width, max(1, min(width, height) // 2)))
-    background = estimate_background(pixels, width, height, edge)
     mask = bytearray(width * height)
     candidates = 0
     for y in range(height):
@@ -158,6 +159,7 @@ def detect(args):
     dense_regions = dense_grid_fallback(image, regions, args)
     if dense_regions:
         regions = dense_regions
+    regions = [attach_points(region, pixels, width, height, background, args) for region in regions]
     elapsed = int((perf_counter() - started) * 1000)
     return {
         "mode": "python_ml_heuristic",
@@ -283,6 +285,60 @@ def dense_grid_fallback(image, regions, args):
             if right - left < args.min_width or bottom - top < args.min_height:
                 continue
             output.append({"x": left, "y": top, "width": right - left, "height": bottom - top, "score": 0.75})
+    return output
+
+
+def attach_points(region, pixels, image_width, image_height, background, args):
+    refined = refine_region_polygon(region, pixels, image_width, image_height, background, args)
+    if refined is None:
+        return region
+    return {**region, "points": refined}
+
+
+def refine_region_polygon(region, pixels, image_width, image_height, background, args):
+    left = max(0, int(region["x"]))
+    top = max(0, int(region["y"]))
+    right = min(image_width, left + int(region["width"]))
+    bottom = min(image_height, top + int(region["height"]))
+    if right - left < 2 or bottom - top < 2:
+        return None
+
+    rows = []
+    threshold = max(8, args.color_distance_threshold * 0.75)
+    for y in range(top, bottom):
+        min_x = None
+        max_x = None
+        for x in range(left, right):
+            color = pixels[x, y]
+            is_foreground = color[3] > args.alpha_threshold and rgba_distance(color, background) > threshold
+            if not is_foreground and color[3] > 220:
+                is_foreground = rgba_distance(color, background) > threshold * 1.15
+            if not is_foreground:
+                continue
+            min_x = x if min_x is None else min(min_x, x)
+            max_x = x if max_x is None else max(max_x, x)
+        if min_x is not None and max_x is not None:
+            rows.append((y, min_x, max_x + 1))
+    if len(rows) < 2:
+        return None
+
+    step = max(1, len(rows) // 32)
+    sampled = [row for index, row in enumerate(rows) if index % step == 0]
+    if sampled[-1] != rows[-1]:
+        sampled.append(rows[-1])
+    left_side = [{"x": row_left, "y": row_y} for row_y, row_left, _ in sampled]
+    right_side = [{"x": row_right, "y": row_y + 1} for row_y, _, row_right in reversed(sampled)]
+    points = dedupe_points(left_side + right_side)
+    return points if len(points) >= 3 else None
+
+
+def dedupe_points(points):
+    output = []
+    for point in points:
+        if not output or output[-1] != point:
+            output.append(point)
+    if len(output) > 1 and output[0] == output[-1]:
+        output.pop()
     return output
 
 

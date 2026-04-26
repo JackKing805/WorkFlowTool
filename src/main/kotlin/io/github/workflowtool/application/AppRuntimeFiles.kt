@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.Comparator
+import java.time.Instant
 import kotlin.io.path.Path
 import kotlin.io.path.exists
 
@@ -28,9 +29,38 @@ internal object AppRuntimeFiles {
 
     private fun installPythonAssets(target: Path) {
         Files.createDirectories(target)
+        val preserveUserModels = hasUserModelMarker(target)
         pythonAssets.forEach { relative ->
-            copyResource("python_detector/$relative", target.resolve(relative), overwrite = shouldOverwritePythonAsset(relative))
+            when (pythonAssetPolicy(relative)) {
+                PythonAssetPolicy.Overwrite -> copyResource("python_detector/$relative", target.resolve(relative), overwrite = true)
+                PythonAssetPolicy.CopyIfMissing -> copyResource(
+                    "python_detector/$relative",
+                    target.resolve(relative),
+                    overwrite = false
+                )
+                PythonAssetPolicy.SeedModel -> {
+                    if (!preserveUserModels) {
+                        copyResource("python_detector/$relative", target.resolve(relative), overwrite = false)
+                    }
+                }
+            }
         }
+    }
+
+    fun markUserModelUpdated() {
+        val target = pythonDir.resolve("model").resolve("runtime-model-state.json")
+        runCatching {
+            Files.createDirectories(target.parent)
+            Files.writeString(
+                target,
+                """{"userTrained":true,"updatedAt":"${Instant.now()}"}""",
+                Charsets.UTF_8
+            )
+        }
+    }
+
+    private fun hasUserModelMarker(target: Path): Boolean {
+        return target.resolve("model").resolve("runtime-model-state.json").exists()
     }
 
     fun clearCreatedFiles(): RuntimeCleanupResult {
@@ -81,8 +111,12 @@ internal object AppRuntimeFiles {
         return target.toFile()
     }
 
-    private fun shouldOverwritePythonAsset(relative: String): Boolean {
-        return relative.endsWith(".py") || relative == "README.md"
+    private fun pythonAssetPolicy(relative: String): PythonAssetPolicy {
+        return when {
+            relative.endsWith(".py") || relative == "README.md" -> PythonAssetPolicy.Overwrite
+            relative.startsWith("model/") -> PythonAssetPolicy.SeedModel
+            else -> PythonAssetPolicy.CopyIfMissing
+        }
     }
 
     private fun nativeLibraryName(): String {
@@ -132,3 +166,9 @@ internal data class RuntimeCleanupResult(
     val deletedCount: Int,
     val failures: List<String>
 )
+
+private enum class PythonAssetPolicy {
+    Overwrite,
+    CopyIfMissing,
+    SeedModel
+}

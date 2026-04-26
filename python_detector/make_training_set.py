@@ -49,10 +49,13 @@ def coarse_grid(image, columns, rows, inset=8):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(SCRIPT_DIR / "training_sets" / "combined"))
+    parser.add_argument("--recent-out", default=str(SCRIPT_DIR / "training_sets" / "recent_feedback"))
     args = parser.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    recent_out = Path(args.recent_out)
+    recent_out.mkdir(parents=True, exist_ok=True)
     records = []
 
     test = seed_image("test.png", Path("test.png"))
@@ -64,13 +67,20 @@ def main():
     icons2 = seed_image("icons2.png", Path("xunlian/icons2.png"))
     records.append({"image": relative_image_path(icons2, out), "regions": coarse_grid(icons2, columns=10, rows=10, inset=10)})
 
-    records.extend(load_user_feedback(out))
+    feedback_records = load_user_feedback(out)
+    records.extend(feedback_records)
+    write_recent_feedback_dataset(recent_out)
 
     with (out / "annotations.jsonl").open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    print(json.dumps({"dataset": str(out), "records": len(records), "regions": [len(r["regions"]) for r in records]}, ensure_ascii=False))
+    print(json.dumps({
+        "dataset": str(out),
+        "recent_dataset": str(recent_out),
+        "records": len(records),
+        "regions": [len(r["regions"]) for r in records]
+    }, ensure_ascii=False))
 
 
 def load_user_feedback(out_dir):
@@ -79,7 +89,8 @@ def load_user_feedback(out_dir):
     if not manifest.exists():
         return []
     records = []
-    for line in manifest.read_text(encoding="utf-8").splitlines():
+    lines = [line for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for index, line in enumerate(lines):
         if not line.strip():
             continue
         record = json.loads(line)
@@ -87,8 +98,28 @@ def load_user_feedback(out_dir):
         if not source.exists():
             continue
         record["image"] = str(source.resolve().relative_to(out_dir.resolve(), walk_up=True)).replace("\\", "/")
-        records.append(record)
+        # Weight user-confirmed corrections more heavily, with a boost for recent samples.
+        remaining = len(lines) - index
+        weight = 4 + min(4, max(0, remaining - 1))
+        records.extend(dict(record) for _ in range(weight))
     return records
+
+
+def write_recent_feedback_dataset(out_dir):
+    feedback_root = SCRIPT_DIR / "training_sets" / "user_feedback"
+    manifest = feedback_root / "annotations.jsonl"
+    if not manifest.exists():
+        return
+    lines = [line for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        return
+    record = json.loads(lines[-1])
+    source = feedback_root / record["image"]
+    if not source.exists():
+        return
+    record["image"] = str(source.resolve().relative_to(out_dir.resolve(), walk_up=True)).replace("\\", "/")
+    with (out_dir / "annotations.jsonl").open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def seed_image(name, dev_fallback):

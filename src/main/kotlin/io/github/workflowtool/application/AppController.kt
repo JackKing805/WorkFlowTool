@@ -1023,7 +1023,7 @@ class AppController(
             val targetName = "${timestamp}_${safeName}.png"
             val target = imagesDir.resolve(targetName)
             check(ImageIO.write(loaded, "png", target.toFile())) { "训练样本图片写入失败" }
-            val line = buildTrainingJsonLine("images/$targetName", visibleRegions)
+            val line = buildTrainingJsonLine("images/$targetName", imagePixelHash(loaded), visibleRegions)
             Files.writeString(
                 datasetRoot.resolve("annotations.jsonl"),
                 line + System.lineSeparator(),
@@ -1101,20 +1101,41 @@ class AppController(
             if (update.icon) {
                 val makeDataset = runPythonCommand("make_training_set.py")
                 check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
-                val train = runPythonCommand(
-                    "train_icon_detector.py",
-                    "--dataset",
-                    "training_sets/combined",
-                    "--out",
-                    "model/combined",
-                    "--epochs",
-                    "3",
-                    "--imgsz",
-                    "640",
-                    "--batch",
-                    "2"
-                )
-                check(train.exitCode == 0) { train.output.ifBlank { "模型训练失败" } }
+                val recentManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("recent_feedback").resolve("annotations.jsonl")
+                if (shouldRunFullIconRetrain()) {
+                    val trainCombined = runPythonCommand(
+                        "train_icon_detector.py",
+                        "--dataset",
+                        "training_sets/combined",
+                        "--out",
+                        "model/combined",
+                        "--epochs",
+                        "4",
+                        "--imgsz",
+                        "512",
+                        "--batch",
+                        "2"
+                    )
+                    check(trainCombined.exitCode == 0) { trainCombined.output.ifBlank { "模型训练失败" } }
+                    log("图标模型已执行全量稳态训练")
+                }
+                if (recentManifest.exists()) {
+                    val trainRecent = runPythonCommand(
+                        "train_icon_detector.py",
+                        "--dataset",
+                        "training_sets/recent_feedback",
+                        "--out",
+                        "model/combined",
+                        "--epochs",
+                        "2",
+                        "--imgsz",
+                        "512",
+                        "--batch",
+                        "1"
+                    )
+                    check(trainRecent.exitCode == 0) { trainRecent.output.ifBlank { "最近样本微调失败" } }
+                    log("图标模型已执行最近样本快速微调")
+                }
             }
             if (update.magic) trainMagicModelIfNeeded()
             if (update.background) trainBackgroundModelIfNeeded()
@@ -1145,6 +1166,17 @@ class AppController(
         val train = runPythonCommand("train_background_model.py")
         check(train.exitCode == 0) { train.output.ifBlank { "背景模型训练失败" } }
         BackgroundColorModel.invalidate()
+    }
+
+    private fun shouldRunFullIconRetrain(): Boolean {
+        val best = AppRuntimeFiles.pythonDir.resolve("model").resolve("combined").resolve("runs").resolve("weights").resolve("best.pt")
+        if (!best.exists()) return true
+        val feedbackManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
+        if (!feedbackManifest.exists()) return false
+        val sampleCount = runCatching {
+            Files.readAllLines(feedbackManifest, Charsets.UTF_8).count { it.isNotBlank() }
+        }.getOrDefault(0)
+        return sampleCount <= 2 || sampleCount % 5 == 0
     }
 
     private fun buildTrainingFingerprint(config: ExportConfig): String {
@@ -1329,11 +1361,11 @@ private fun estimateCornerBackgroundArgb(image: BufferedImage): Int {
         (b / count).toInt()
 }
 
-private fun buildTrainingJsonLine(imagePath: String, regions: List<CropRegion>): String {
+private fun buildTrainingJsonLine(imagePath: String, imageHash: String, regions: List<CropRegion>): String {
     val boxes = regions.joinToString(",") { region ->
         """{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}"""
     }
-    return """{"image":"${escapeJson(imagePath)}","regions":[$boxes]}"""
+    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","regions":[$boxes]}"""
 }
 
 private fun buildMagicTrainingJsonLine(
@@ -1349,6 +1381,20 @@ private fun buildMagicTrainingJsonLine(
 private fun sha256(value: String): String {
     val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
     return bytes.joinToString("") { "%02x".format(it) }
+}
+
+private fun imagePixelHash(image: BufferedImage): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    for (y in 0 until image.height) {
+        for (x in 0 until image.width) {
+            val argb = image.getRGB(x, y)
+            digest.update((argb ushr 24 and 0xFF).toByte())
+            digest.update((argb ushr 16 and 0xFF).toByte())
+            digest.update((argb ushr 8 and 0xFF).toByte())
+            digest.update((argb and 0xFF).toByte())
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 private fun escapeJson(value: String): String =
