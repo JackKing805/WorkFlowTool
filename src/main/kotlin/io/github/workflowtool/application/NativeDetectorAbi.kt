@@ -11,6 +11,7 @@ import io.github.workflowtool.model.DetectionMode
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
 import io.github.workflowtool.model.GridConfig
+import io.github.workflowtool.model.RegionPoint
 import java.awt.image.BufferedImage
 
 internal interface CppDetectorLibrary : Library {
@@ -299,7 +300,8 @@ internal fun NativeMagicResult.toMagicSelectionResult(): MagicSelectionResult? {
             width = region.width,
             height = region.height,
             visible = region.visible.toBooleanFlag(default = true),
-            selected = true
+            selected = true,
+            points = magicMaskOutline(decodedMask, imageWidth, imageHeight)
         ),
         mask = decodedMask,
         imageWidth = imageWidth,
@@ -308,6 +310,46 @@ internal fun NativeMagicResult.toMagicSelectionResult(): MagicSelectionResult? {
         seedY = seedY,
         pixelCount = pixelCount
     )
+}
+
+private fun magicMaskOutline(mask: BooleanArray, width: Int, height: Int): List<RegionPoint> {
+    if (width <= 0 || height <= 0 || mask.isEmpty()) return emptyList()
+    val rows = mutableListOf<MagicMaskSpan>()
+    for (y in 0 until height) {
+        var left = -1
+        var right = -1
+        for (x in 0 until width) {
+            if (mask[y * width + x]) {
+                if (left < 0) left = x
+                right = x
+            }
+        }
+        if (left >= 0) rows += MagicMaskSpan(y, left, right + 1)
+    }
+    if (rows.isEmpty()) return emptyList()
+
+    val step = (rows.size / 96).coerceAtLeast(1)
+    val sampled = rows.filterIndexed { index, _ -> index % step == 0 }.toMutableList()
+    if (sampled.last() != rows.last()) sampled += rows.last()
+
+    val leftSide = sampled.map { RegionPoint(it.left, it.y) }
+    val rightSide = sampled.asReversed().map { RegionPoint(it.right, it.y + 1) }
+    return (leftSide + rightSide).dedupeAdjacentPoints()
+}
+
+private data class MagicMaskSpan(
+    val y: Int,
+    val left: Int,
+    val right: Int
+)
+
+private fun List<RegionPoint>.dedupeAdjacentPoints(): List<RegionPoint> {
+    val output = mutableListOf<RegionPoint>()
+    forEach { point ->
+        if (output.lastOrNull() != point) output += point
+    }
+    if (output.size > 1 && output.first() == output.last()) output.removeAt(output.lastIndex)
+    return output
 }
 
 internal val DetectionMode.nativeValue: Int

@@ -33,7 +33,7 @@ import java.awt.image.BufferedImage
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -43,6 +43,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlin.io.path.exists
+import kotlin.math.ceil
+import kotlin.math.sqrt
 
 class AppController(
     private val detector: RegionDetector,
@@ -63,6 +65,10 @@ class AppController(
         private set
 
     var imageFile by mutableStateOf<File?>(null)
+        private set
+    var imageFiles by mutableStateOf<List<File>>(emptyList())
+        private set
+    var currentImageIndex by mutableStateOf(-1)
         private set
     var image by mutableStateOf<BufferedImage?>(null)
         private set
@@ -101,6 +107,10 @@ class AppController(
     var keepOriginalSize by mutableStateOf(true)
         private set
     var trimTransparent by mutableStateOf(false)
+        private set
+    var removeBackgroundToTransparent by mutableStateOf(false)
+        private set
+    var backgroundRemovalTolerance by mutableStateOf(20)
         private set
     var padToSquare by mutableStateOf(false)
         private set
@@ -157,6 +167,8 @@ class AppController(
         get() = formatArgb(lastDetectionResult.stats.estimatedBackgroundArgb)
     val activeBackgroundLabel: String
         get() = sampledBackgroundArgb?.let(::formatArgb) ?: "自动"
+    val exportBackgroundLabel: String
+        get() = sampledBackgroundArgb?.let { "${formatArgb(it)}（吸色）" } ?: "${formatArgb(lastDetectionResult.stats.estimatedBackgroundArgb)}（自动）"
     val detectionBackendLabel: String
         get() = "${nativeEngine.backendName} (${nativeEngine.detail})"
     val hoverPositionLabel: String
@@ -197,11 +209,36 @@ class AppController(
     }
 
     fun openOutputDirectory() {
-        runCatching { DesktopPlatform.openDirectory(outputDirectory) }
-            .onFailure { log("打开输出目录失败：${it.message}") }
+        openDirectorySafely(outputDirectory, "输出目录")
+    }
+
+    fun openRuntimeDirectory() {
+        openDirectorySafely(AppRuntimeFiles.runtimeRoot, "应用运行目录")
+    }
+
+    fun openPythonRuntimeDirectory() {
+        openDirectorySafely(AppRuntimeFiles.pythonDir, "Python 运行目录")
+    }
+
+    fun openTrainingSetDirectory() {
+        openDirectorySafely(AppRuntimeFiles.pythonDir.resolve("training_sets"), "训练集目录")
+    }
+
+    fun openModelDirectory() {
+        openDirectorySafely(AppRuntimeFiles.pythonDir.resolve("model"), "模型目录")
+    }
+
+    fun openNativeRuntimeDirectory() {
+        openDirectorySafely(AppRuntimeFiles.runtimeRoot.resolve("native"), "Native 运行目录")
     }
 
     fun loadFile(file: File) {
+        imageFiles = listOf(file)
+        currentImageIndex = 0
+        loadFileContent(file)
+    }
+
+    private fun loadFileContent(file: File) {
         runCatching {
             val loaded = ImageIO.read(file) ?: error("不支持的图片格式")
             imageFile = file
@@ -224,16 +261,95 @@ class AppController(
         }
     }
 
+    fun loadFilesAsync(files: List<File>) {
+        val images = files.filter { it.isFile && it.extension.lowercase() in supportedImageExtensions }
+        if (images.isEmpty()) {
+            log("未找到可导入的图片文件")
+            return
+        }
+        runBusy("正在拖入 ${images.size} 张图片...") {
+            appendDroppedFiles(images)
+        }
+    }
+
+    fun loadFiles(files: List<File>) {
+        val images = files.filter { it.isFile && it.extension.lowercase() in supportedImageExtensions }
+        if (images.isEmpty()) {
+            log("未找到可导入的图片文件")
+            return
+        }
+        if (images.size == 1) {
+            loadFile(images.first())
+            return
+        }
+        runCatching {
+            val loaded = images.mapNotNull { file ->
+                ImageIO.read(file)?.let { file to it }
+            }
+            if (loaded.isEmpty()) error("没有可读取的图片")
+            val combined = combineImages(loaded.map { it.second }, multiImageGap)
+            imageFiles = loaded.map { it.first }
+            currentImageIndex = 0
+            imageFile = loaded.first().first
+            image = combined
+            zoom = 1.0f
+            viewportOffset = Offset.Zero
+            hoveredImagePoint = null
+            backgroundPickArmed = false
+            magicSelectionPreview = null
+            log("多图画布加载成功：${loaded.size} 张，${combined.width} x ${combined.height}，间隔 ${multiImageGap}px")
+            regenerateBaseSafely(logResult = true)
+        }.onFailure {
+            log("多图导入失败：${it.message}")
+        }
+    }
+
+    private fun appendDroppedFiles(files: List<File>) {
+        val current = image
+        if (current == null) {
+            loadFiles(files)
+            return
+        }
+        runCatching {
+            val loaded = files.mapNotNull { file ->
+                ImageIO.read(file)?.let { file to it }
+            }
+            if (loaded.isEmpty()) error("没有可读取的图片")
+            val combined = appendImagesToCanvas(current, loaded.map { it.second }, multiImageGap)
+            imageFiles = imageFiles + loaded.map { it.first }
+            image = combined
+            hoveredImagePoint = null
+            backgroundPickArmed = false
+            magicSelectionPreview = null
+            log("已拖入追加 ${loaded.size} 张图片：画布 ${combined.width} x ${combined.height}，原有选框已保留")
+        }.onFailure {
+            log("拖入图片失败：${it.message}")
+        }
+    }
+
+    fun openPreviousImage() {
+        val files = imageFiles
+        if (files.size <= 1 || currentImageIndex <= 0) return
+        runBusy("正在切换图片...") {
+            currentImageIndex -= 1
+            loadFileContent(files[currentImageIndex])
+        }
+    }
+
+    fun openNextImage() {
+        val files = imageFiles
+        if (files.size <= 1 || currentImageIndex !in 0 until files.lastIndex) return
+        runBusy("正在切换图片...") {
+            currentImageIndex += 1
+            loadFileContent(files[currentImageIndex])
+        }
+    }
+
     fun rebuildFromAuto(logResult: Boolean = false) {
         val loaded = image ?: return
-        val file = imageFile
         val detected = detector.detect(loaded, effectiveDetectionConfig())
         lastDetectionResult = detected
         applyBaseGeneration(SplitSource.AutoDetect, detected.regions, logResult, "自动识别")
-        if (continuousTrainingEnabled && file != null && regions.any { it.visible }) {
-            appendTrainingSample(file, "自动识别")
-            retrainContinuousModel()
-        }
     }
 
     fun rebuildFromAutoAsync(logResult: Boolean = false) {
@@ -272,7 +388,8 @@ class AppController(
     fun armBackgroundPicker() {
         backgroundPickArmed = image != null
         if (backgroundPickArmed) {
-            log("已进入背景取色模式")
+            updateToolMode(ToolMode.Eyedropper)
+            log("已进入吸色工具")
         }
     }
 
@@ -280,10 +397,8 @@ class AppController(
         if (sampledBackgroundArgb == null) return
         sampledBackgroundArgb = null
         backgroundPickArmed = false
+        if (toolMode == ToolMode.Eyedropper) toolMode = ToolMode.Select
         log("已清除手动背景色")
-        if (splitSource == SplitSource.AutoDetect && image != null) {
-            rebuildFromAuto(logResult = true)
-        }
     }
 
     fun sampleBackgroundAt(point: Offset) {
@@ -292,10 +407,8 @@ class AppController(
         val y = point.y.toInt().coerceIn(0, loaded.height - 1)
         sampledBackgroundArgb = loaded.getRGB(x, y)
         backgroundPickArmed = false
+        toolMode = ToolMode.Select
         log("已取背景色 ($x, $y)：${activeBackgroundLabel}")
-        if (splitSource == SplitSource.AutoDetect) {
-            rebuildFromAuto(logResult = true)
-        }
     }
 
     fun resetManualEdits() {
@@ -338,9 +451,26 @@ class AppController(
         log("裁剪完成：成功 ${result.successCount} 个，失败 ${result.failureCount} 个")
         result.failures.take(3).forEach { log("失败：$it") }
         log("输出目录：$outputDirectory")
-        if (continuousTrainingEnabled && result.successCount > 0) {
-            appendTrainingSample(file, "导出确认")
-            retrainContinuousModel()
+        if (continuousTrainingEnabled && result.successCount > 0 && hasManualEdits) {
+            val trainingFingerprint = buildTrainingFingerprint(config)
+            if (hasTrainingFingerprint(trainingFingerprint)) {
+                log("持续学习未更新：当前选框和参数已训练过")
+                return
+            }
+            val trainingUpdate = ContinuousTrainingUpdate(
+                icon = appendTrainingSample("手动修正后导出确认"),
+                magic = appendMagicTrainingSample("手动修正后魔棒确认"),
+                background = appendBackgroundTrainingSample("手动修正后背景确认")
+            )
+            if (!trainingUpdate.hasUpdates) {
+                log("持续学习未更新：没有可用的用户确认训练样本")
+                return
+            }
+            if (retrainContinuousModels(trainingUpdate)) {
+                rememberTrainingFingerprint(trainingFingerprint)
+            }
+        } else if (continuousTrainingEnabled && result.successCount > 0) {
+            log("持续学习未更新：当前结果没有手动修正")
         }
     }
 
@@ -384,6 +514,9 @@ class AppController(
     fun updateToolMode(mode: ToolMode) {
         if (toolMode == mode) return
         toolMode = mode
+        if (mode != ToolMode.Eyedropper) {
+            backgroundPickArmed = false
+        }
         if (mode != ToolMode.Magic) {
             magicSelectionPreview = null
         }
@@ -602,13 +735,11 @@ class AppController(
     fun updateDetectionConfig(next: DetectionConfig) {
         if (detectionConfig == next) return
         detectionConfig = next
-        if (splitSource == SplitSource.AutoDetect && image != null) rebuildFromAuto(logResult = true)
     }
 
     fun updateGridConfig(next: GridConfig) {
         if (gridConfig == next) return
         gridConfig = next
-        if (splitSource == SplitSource.SmartGrid && image != null) rebuildFromSmartGrid(logResult = true)
     }
 
     fun updateOutputFormat(next: ImageFormat) {
@@ -637,6 +768,17 @@ class AppController(
         trimTransparent = next
     }
 
+    fun updateRemoveBackgroundToTransparent(next: Boolean) {
+        if (removeBackgroundToTransparent == next) return
+        removeBackgroundToTransparent = next
+    }
+
+    fun updateBackgroundRemovalTolerance(next: Int) {
+        val sanitized = next.coerceIn(0, 255)
+        if (backgroundRemovalTolerance == sanitized) return
+        backgroundRemovalTolerance = sanitized
+    }
+
     fun updatePadToSquare(next: Boolean) {
         if (padToSquare == next) return
         padToSquare = next
@@ -657,7 +799,16 @@ class AppController(
     fun updateContinuousTrainingEnabled(next: Boolean) {
         if (continuousTrainingEnabled == next) return
         continuousTrainingEnabled = next
-        log(if (next) "持续学习已开启：识别和导出确认后的区域会更新训练集并重训模型" else "持续学习已关闭")
+        log(if (next) "持续学习已开启：只有手动修正后导出确认的区域会更新训练集并重训模型" else "持续学习已关闭")
+    }
+
+    fun clearRuntimeGeneratedFiles() {
+        val result = AppRuntimeFiles.clearCreatedFiles()
+        log("已清理应用运行时文件：删除 ${result.deletedCount} 项，目录：${result.root}")
+        result.failures.take(5).forEach { log("清理失败：$it") }
+        if (result.failures.isNotEmpty()) {
+            log("部分文件可能正在被应用占用，重启后可再次清理")
+        }
     }
 
     fun showAdvancedSettings(show: Boolean) {
@@ -686,6 +837,9 @@ class AppController(
             customPrefix = customPrefix,
             keepOriginalSize = keepOriginalSize,
             trimTransparentPadding = trimTransparent,
+            removeBackgroundToTransparent = removeBackgroundToTransparent,
+            backgroundArgb = sampledBackgroundArgb ?: lastDetectionResult.stats.estimatedBackgroundArgb,
+            backgroundTolerance = backgroundRemovalTolerance,
             padToSquare = padToSquare,
             fixedSize = fixedSizeText.toIntOrNull(),
             overwriteExisting = overwriteExisting
@@ -710,7 +864,7 @@ class AppController(
     }
 
     private fun syncManualEdits() {
-        hasManualEdits = normalizeRegionIds(regions) != baseRegions
+        hasManualEdits = trainingComparableRegions(regions) != trainingComparableRegions(baseRegions)
     }
 
     private fun normalizeRegionIds(input: List<CropRegion>): List<CropRegion> {
@@ -773,11 +927,13 @@ class AppController(
     }
 
     private fun detectMagicAt(loaded: BufferedImage, x: Int, y: Int): MagicSelectionResult? {
+        if (x !in 0 until loaded.width || y !in 0 until loaded.height) return null
+        val tolerance = MagicToleranceModel.predict(loaded.getRGB(x, y), magicTolerance)
         return detectMagicRegion(
             loaded,
             x,
             y,
-            detectionConfig.copy(colorDistanceThreshold = magicTolerance)
+            detectionConfig.copy(colorDistanceThreshold = tolerance)
         )
     }
 
@@ -842,24 +998,31 @@ class AppController(
 
     private fun effectiveDetectionConfig(): DetectionConfig {
         val background = sampledBackgroundArgb
+        val predictedBackground = if (background == null) {
+            image?.let(::estimateCornerBackgroundArgb)?.let(BackgroundColorModel::predict)
+        } else {
+            null
+        }
         return detectionConfig.copy(
-            useManualBackground = background != null,
-            manualBackgroundArgb = background ?: 0
+            useManualBackground = background != null || predictedBackground != null,
+            manualBackgroundArgb = background ?: predictedBackground ?: 0
         )
     }
 
-    private fun appendTrainingSample(sourceFile: File, sourceLabel: String) {
+    private fun appendTrainingSample(sourceLabel: String): Boolean {
+        val loaded = image ?: return false
         val visibleRegions = regions.filter { it.visible }
-        if (visibleRegions.isEmpty()) return
-        runCatching {
+        if (visibleRegions.isEmpty()) return false
+        return runCatching {
             val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback")
             val imagesDir = datasetRoot.resolve("images")
             Files.createDirectories(imagesDir)
             val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))
-            val extension = sourceFile.extension.ifBlank { "png" }
-            val targetName = "${timestamp}_${sourceFile.nameWithoutExtension}.${extension}"
+            val sourceName = imageFile?.nameWithoutExtension.orEmpty().ifBlank { "canvas" }
+            val safeName = sourceName.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_').ifBlank { "canvas" }
+            val targetName = "${timestamp}_${safeName}.png"
             val target = imagesDir.resolve(targetName)
-            Files.copy(sourceFile.toPath(), target, StandardCopyOption.REPLACE_EXISTING)
+            check(ImageIO.write(loaded, "png", target.toFile())) { "训练样本图片写入失败" }
             val line = buildTrainingJsonLine("images/$targetName", visibleRegions)
             Files.writeString(
                 datasetRoot.resolve("annotations.jsonl"),
@@ -869,34 +1032,182 @@ class AppController(
                 java.nio.file.StandardOpenOption.APPEND
             )
             log("持续学习样本已记录：$sourceLabel，${visibleRegions.size} 个区域")
+            true
         }.onFailure {
             log("持续学习样本记录失败：${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun appendMagicTrainingSample(sourceLabel: String): Boolean {
+        val loaded = image ?: return false
+        val preview = magicSelectionPreview ?: return false
+        val acceptedRegion = preview.regionId?.let { id -> regions.firstOrNull { it.id == id } } ?: return false
+        return runCatching {
+            val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("magic_feedback")
+            val imagesDir = datasetRoot.resolve("images")
+            Files.createDirectories(imagesDir)
+            val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))
+            val sourceName = imageFile?.nameWithoutExtension.orEmpty().ifBlank { "canvas" }
+            val safeName = sourceName.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_').ifBlank { "canvas" }
+            val targetName = "${timestamp}_${safeName}_magic.png"
+            val target = imagesDir.resolve(targetName)
+            check(ImageIO.write(loaded, "png", target.toFile())) { "魔棒训练样本图片写入失败" }
+            val line = buildMagicTrainingJsonLine(
+                imagePath = "images/$targetName",
+                seedX = preview.seedX,
+                seedY = preview.seedY,
+                tolerance = magicTolerance,
+                region = acceptedRegion
+            )
+            Files.writeString(
+                datasetRoot.resolve("annotations.jsonl"),
+                line + System.lineSeparator(),
+                Charsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND
+            )
+            log("魔棒训练样本已记录：$sourceLabel")
+            true
+        }.onFailure {
+            log("魔棒训练样本记录失败：${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun appendBackgroundTrainingSample(sourceLabel: String): Boolean {
+        val loaded = image ?: return false
+        val background = sampledBackgroundArgb ?: return false
+        return runCatching {
+            val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("background_feedback")
+            Files.createDirectories(datasetRoot)
+            val edgeArgb = estimateCornerBackgroundArgb(loaded)
+            val line = """{"edgeArgb":$edgeArgb,"backgroundArgb":$background}"""
+            Files.writeString(
+                datasetRoot.resolve("annotations.jsonl"),
+                line + System.lineSeparator(),
+                Charsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND
+            )
+            log("背景训练样本已记录：$sourceLabel")
+            true
+        }.onFailure {
+            log("背景训练样本记录失败：${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun retrainContinuousModels(update: ContinuousTrainingUpdate): Boolean {
+        return runCatching {
+            busyMessage = "正在用本次结果更新模型..."
+            if (update.icon) {
+                val makeDataset = runPythonCommand("make_training_set.py")
+                check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
+                val train = runPythonCommand(
+                    "train_icon_detector.py",
+                    "--dataset",
+                    "training_sets/combined",
+                    "--out",
+                    "model/combined",
+                    "--epochs",
+                    "3",
+                    "--imgsz",
+                    "640",
+                    "--batch",
+                    "2"
+                )
+                check(train.exitCode == 0) { train.output.ifBlank { "模型训练失败" } }
+            }
+            if (update.magic) trainMagicModelIfNeeded()
+            if (update.background) trainBackgroundModelIfNeeded()
+            log("持续学习模型已更新，下次识别会使用新模型")
+            true
+        }.onFailure {
+            log("持续学习模型更新失败：${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun trainMagicModelIfNeeded() {
+        val samples = AppRuntimeFiles.pythonDir
+            .resolve("training_sets")
+            .resolve("magic_feedback")
+            .resolve("annotations.jsonl")
+        if (!samples.exists()) return
+        val train = runPythonCommand("train_magic_model.py")
+        check(train.exitCode == 0) { train.output.ifBlank { "魔棒模型训练失败" } }
+        MagicToleranceModel.invalidate()
+    }
+
+    private fun trainBackgroundModelIfNeeded() {
+        val samples = AppRuntimeFiles.pythonDir
+            .resolve("training_sets")
+            .resolve("background_feedback")
+            .resolve("annotations.jsonl")
+        if (!samples.exists()) return
+        val train = runPythonCommand("train_background_model.py")
+        check(train.exitCode == 0) { train.output.ifBlank { "背景模型训练失败" } }
+        BackgroundColorModel.invalidate()
+    }
+
+    private fun buildTrainingFingerprint(config: ExportConfig): String {
+        val source = buildString {
+            append("image=").append(imageIdentity()).append('\n')
+            append("regions=").append(trainingComparableRegions(regions).filter { it.visible }.joinToString("|") { region ->
+                buildString {
+                    append(region.x).append(',').append(region.y).append(',')
+                        .append(region.width).append(',').append(region.height).append(',')
+                        .append(region.visible)
+                    append(':')
+                    append(region.points.joinToString(";") { "${it.x},${it.y}" })
+                }
+            }).append('\n')
+            append("sampledBackground=").append(sampledBackgroundArgb ?: "auto").append('\n')
+            append("magic=").append(magicSelectionPreview?.let { "${it.seedX},${it.seedY},$magicTolerance,${it.regionId}" } ?: "none").append('\n')
+            append("format=").append(config.outputFormat).append('\n')
+            append("keepOriginalSize=").append(config.keepOriginalSize).append('\n')
+            append("trimTransparentPadding=").append(config.trimTransparentPadding).append('\n')
+            append("removeBackgroundToTransparent=").append(config.removeBackgroundToTransparent).append('\n')
+            append("backgroundArgb=").append(config.backgroundArgb).append('\n')
+            append("backgroundTolerance=").append(config.backgroundTolerance).append('\n')
+            append("padToSquare=").append(config.padToSquare).append('\n')
+            append("fixedSize=").append(config.fixedSize ?: "none")
+        }
+        return sha256(source)
+    }
+
+    private fun imageIdentity(): String {
+        val loaded = image ?: return "none"
+        val files = imageFiles.takeIf { it.isNotEmpty() } ?: imageFile?.let(::listOf).orEmpty()
+        val fileIdentity = files.joinToString("|") { file ->
+            "${file.absolutePath}:${file.length()}:${file.lastModified()}"
+        }
+        return "${loaded.width}x${loaded.height}:$fileIdentity"
+    }
+
+    private fun hasTrainingFingerprint(fingerprint: String): Boolean {
+        val file = trainingFingerprintFile()
+        if (!file.exists()) return false
+        return runCatching {
+            Files.readAllLines(file, Charsets.UTF_8).any { it == fingerprint }
+        }.getOrDefault(false)
+    }
+
+    private fun rememberTrainingFingerprint(fingerprint: String) {
+        runCatching {
+            val file = trainingFingerprintFile()
+            Files.createDirectories(file.parent)
+            Files.writeString(
+                file,
+                fingerprint + System.lineSeparator(),
+                Charsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND
+            )
+        }.onFailure {
+            log("训练指纹记录失败：${it.message}")
         }
     }
 
-    private fun retrainContinuousModel() {
-        runCatching {
-            busyMessage = "正在用本次结果更新模型..."
-            val makeDataset = runPythonCommand("make_training_set.py")
-            check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
-            val train = runPythonCommand(
-                "train_icon_detector.py",
-                "--dataset",
-                "training_sets/combined",
-                "--out",
-                "model/combined",
-                "--epochs",
-                "3",
-                "--imgsz",
-                "640",
-                "--batch",
-                "2"
-            )
-            check(train.exitCode == 0) { train.output.ifBlank { "模型训练失败" } }
-            log("持续学习模型已更新，下次识别会使用新模型")
-        }.onFailure {
-            log("持续学习模型更新失败：${it.message}")
-        }
+    private fun trainingFingerprintFile(): Path {
+        return AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("trained_fingerprints.txt")
     }
 
     private fun runPythonCommand(vararg args: String): ProcessResult {
@@ -906,6 +1217,16 @@ class AppController(
             .start()
         val output = process.inputStream.bufferedReader(Charsets.UTF_8).readText()
         return ProcessResult(process.waitFor(), output)
+    }
+
+    private fun openDirectorySafely(path: Path, label: String) {
+        runCatching {
+            Files.createDirectories(path)
+            DesktopPlatform.openDirectory(path)
+            log("已打开$label：$path")
+        }.onFailure {
+            log("打开$label 失败：${it.message}")
+        }
     }
 
     private fun suggestedPreviewFileName(file: File, region: CropRegion): String {
@@ -921,13 +1242,113 @@ private operator fun Offset.div(scale: Float): Offset = Offset(x / scale, y / sc
 
 private data class ProcessResult(val exitCode: Int, val output: String)
 
+private data class ContinuousTrainingUpdate(
+    val icon: Boolean,
+    val magic: Boolean,
+    val background: Boolean
+) {
+    val hasUpdates: Boolean get() = icon || magic || background
+}
+
+private val supportedImageExtensions = setOf("png", "jpg", "jpeg", "webp", "bmp", "gif")
+private const val multiImageGap = 64
+
 private fun formatArgb(value: Int): String = "#%08X".format(value)
+
+private fun combineImages(images: List<BufferedImage>, gap: Int): BufferedImage {
+    val columns = ceil(sqrt(images.size.toDouble())).toInt().coerceAtLeast(1)
+    val rows = ceil(images.size / columns.toDouble()).toInt().coerceAtLeast(1)
+    val cellWidth = images.maxOf { it.width }
+    val cellHeight = images.maxOf { it.height }
+    val width = columns * cellWidth + (columns - 1).coerceAtLeast(0) * gap
+    val height = rows * cellHeight + (rows - 1).coerceAtLeast(0) * gap
+    val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    val graphics = output.createGraphics()
+    images.forEachIndexed { index, image ->
+        val column = index % columns
+        val row = index / columns
+        graphics.drawImage(image, column * (cellWidth + gap), row * (cellHeight + gap), null)
+    }
+    graphics.dispose()
+    return output
+}
+
+private fun appendImagesToCanvas(base: BufferedImage, images: List<BufferedImage>, gap: Int): BufferedImage {
+    val columns = ceil(sqrt(images.size.toDouble())).toInt().coerceAtLeast(1)
+    val rows = ceil(images.size / columns.toDouble()).toInt().coerceAtLeast(1)
+    val cellWidth = images.maxOf { it.width }
+    val cellHeight = images.maxOf { it.height }
+    val gridWidth = columns * cellWidth + (columns - 1).coerceAtLeast(0) * gap
+    val gridHeight = rows * cellHeight + (rows - 1).coerceAtLeast(0) * gap
+    val offsetX = base.width + gap
+    val output = BufferedImage(offsetX + gridWidth, maxOf(base.height, gridHeight), BufferedImage.TYPE_INT_ARGB)
+    val graphics = output.createGraphics()
+    graphics.drawImage(base, 0, 0, null)
+    images.forEachIndexed { index, image ->
+        val column = index % columns
+        val row = index / columns
+        graphics.drawImage(image, offsetX + column * (cellWidth + gap), row * (cellHeight + gap), null)
+    }
+    graphics.dispose()
+    return output
+}
+
+private fun trainingComparableRegions(regions: List<CropRegion>): List<CropRegion> {
+    return regions.mapIndexed { index, region ->
+        region.copy(id = (index + 1).toString(), selected = false)
+    }
+}
+
+private fun estimateCornerBackgroundArgb(image: BufferedImage): Int {
+    val corner = minOf(image.width, image.height, 24).coerceAtLeast(1)
+    var a = 0L
+    var r = 0L
+    var g = 0L
+    var b = 0L
+    var count = 0L
+    fun add(x: Int, y: Int) {
+        val argb = image.getRGB(x, y)
+        a += argb ushr 24 and 0xFF
+        r += argb ushr 16 and 0xFF
+        g += argb ushr 8 and 0xFF
+        b += argb and 0xFF
+        count += 1
+    }
+    for (y in 0 until corner) {
+        for (x in 0 until corner) {
+            add(x, y)
+            add(image.width - 1 - x, y)
+            add(x, image.height - 1 - y)
+            add(image.width - 1 - x, image.height - 1 - y)
+        }
+    }
+    if (count == 0L) return 0
+    return ((a / count).toInt() shl 24) or
+        ((r / count).toInt() shl 16) or
+        ((g / count).toInt() shl 8) or
+        (b / count).toInt()
+}
 
 private fun buildTrainingJsonLine(imagePath: String, regions: List<CropRegion>): String {
     val boxes = regions.joinToString(",") { region ->
         """{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}"""
     }
     return """{"image":"${escapeJson(imagePath)}","regions":[$boxes]}"""
+}
+
+private fun buildMagicTrainingJsonLine(
+    imagePath: String,
+    seedX: Int,
+    seedY: Int,
+    tolerance: Int,
+    region: CropRegion
+): String {
+    return """{"image":"${escapeJson(imagePath)}","seedX":$seedX,"seedY":$seedY,"tolerance":$tolerance,"region":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}}"""
+}
+
+private fun sha256(value: String): String {
+    val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+    return bytes.joinToString("") { "%02x".format(it) }
 }
 
 private fun escapeJson(value: String): String =

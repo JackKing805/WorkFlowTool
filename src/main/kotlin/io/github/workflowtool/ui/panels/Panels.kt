@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -42,8 +43,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
@@ -61,6 +65,7 @@ import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import io.github.workflowtool.application.AppController
+import io.github.workflowtool.core.IconExporter
 import io.github.workflowtool.domain.LocalizationProvider
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.model.CropRegion
@@ -84,6 +89,7 @@ import io.github.workflowtool.ui.components.nextFormat
 import io.github.workflowtool.ui.components.nextNamingMode
 import io.github.workflowtool.ui.editor.drawCheckerboard
 import io.github.workflowtool.ui.theme.Border
+import io.github.workflowtool.ui.theme.ControlActive
 import io.github.workflowtool.ui.theme.ControlBg
 import io.github.workflowtool.ui.theme.Danger
 import io.github.workflowtool.ui.theme.Panel
@@ -109,8 +115,18 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(8.dp))
             ThumbnailBox(bitmap = remember(controller.image) { controller.image?.toComposeImageBitmap() })
             Spacer(Modifier.height(8.dp))
-            Text(controller.imageFile?.name ?: "未选择图片", color = Color.White, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (controller.imageFiles.size > 1) "多图画布：${controller.imageFiles.size} 张" else controller.imageFile?.name ?: "未选择图片",
+                color = Color.White,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Text(controller.image?.let { "${it.width} x ${it.height}" } ?: "-", color = TextMuted, fontSize = 14.sp)
+            if (controller.imageFiles.size > 1) {
+                Spacer(Modifier.height(8.dp))
+                Text("已按网格排布到同一无限画布，可拖动画布查看。", color = TextDim, fontSize = 12.sp)
+            }
         }
 
         PanelCard(strings.text(StringKey.SplitSettingsTitle), Modifier.fillMaxWidth()) {
@@ -152,7 +168,7 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
                         .border(1.dp, SoftBorder, RoundedCornerShape(7.dp))
                 )
                 GhostButton(
-                    if (controller.backgroundPickArmed) "点击预览取色中" else "取背景色",
+                    if (controller.backgroundPickArmed) "吸色中" else "吸色工具",
                     controller::armBackgroundPicker,
                     active = controller.backgroundPickArmed,
                     modifier = Modifier.weight(1f).height(36.dp)
@@ -248,6 +264,13 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             }
             SmallCheck(strings.text(StringKey.KeepOriginalSize), controller.keepOriginalSize, controller::updateKeepOriginalSize)
             SmallCheck(strings.text(StringKey.TrimTransparent), controller.trimTransparent, controller::updateTrimTransparent)
+            SmallCheck("背景转透明", controller.removeBackgroundToTransparent, controller::updateRemoveBackgroundToTransparent)
+            if (controller.removeBackgroundToTransparent) {
+                StatusLine("透明背景色", controller.exportBackgroundLabel)
+                CompactNumber("背景容差", controller.backgroundRemovalTolerance, "") {
+                    controller.updateBackgroundRemovalTolerance(it)
+                }
+            }
             SmallCheck(strings.text(StringKey.PadToSquare), controller.padToSquare, controller::updatePadToSquare)
         }
     }
@@ -275,32 +298,179 @@ fun Toolbar(controller: AppController, canUndo: Boolean, canRedo: Boolean) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        ToolButton("选择 ${strings.text(StringKey.SelectTool)}", controller.toolMode == ToolMode.Select, onClick = {
+        IconToolButton(ToolbarIcon.Select, strings.text(StringKey.SelectTool), controller.toolMode == ToolMode.Select) {
             controller.updateToolMode(ToolMode.Select)
-        })
-        ToolButton("移动 ${strings.text(StringKey.MoveTool)}", controller.toolMode == ToolMode.Move, onClick = {
+        }
+        IconToolButton(ToolbarIcon.Move, strings.text(StringKey.MoveTool), controller.toolMode == ToolMode.Move) {
             controller.updateToolMode(ToolMode.Move)
-        })
-        ToolButton("绘制 ${strings.text(StringKey.DrawRectangle)}", controller.toolMode == ToolMode.Draw, onClick = {
+        }
+        IconToolButton(ToolbarIcon.Draw, strings.text(StringKey.DrawRectangle), controller.toolMode == ToolMode.Draw) {
             controller.enterManualDrawMode()
-        })
-        ToolButton("魔棒 ${strings.text(StringKey.MagicTool)}", controller.toolMode == ToolMode.Magic, onClick = {
+        }
+        IconToolButton(ToolbarIcon.Magic, strings.text(StringKey.MagicTool), controller.toolMode == ToolMode.Magic) {
             controller.enterMagicSelectionMode()
-        })
+        }
+        IconToolButton(ToolbarIcon.Eyedropper, "吸色", controller.toolMode == ToolMode.Eyedropper) {
+            controller.armBackgroundPicker()
+        }
         Spacer(Modifier.width(8.dp))
-        ToolButton("撤销 ${strings.text(StringKey.Undo)}", canUndo, controller::undo)
-        ToolButton("重做 ${strings.text(StringKey.Redo)}", canRedo, controller::redo)
-        ToolButton("清空 ${strings.text(StringKey.ClearRegions)}", false, controller::clearRegions)
+        IconToolButton(ToolbarIcon.Undo, strings.text(StringKey.Undo), active = false, enabled = canUndo, onClick = controller::undo)
+        IconToolButton(ToolbarIcon.Redo, strings.text(StringKey.Redo), active = false, enabled = canRedo, onClick = controller::redo)
+        IconToolButton(ToolbarIcon.Clear, strings.text(StringKey.ClearRegions), active = false, onClick = controller::clearRegions)
         Spacer(Modifier.width(20.dp))
-        SquareButton("-", onClick = { controller.adjustZoom(-0.1f) })
+        IconToolButton(ToolbarIcon.ZoomOut, "缩小", active = false) { controller.adjustZoom(-0.1f) }
         Box(Modifier.width(58.dp), contentAlignment = Alignment.Center) {
             Text("${(controller.zoom * 100).roundToInt()}%", color = TextMuted, fontSize = 14.sp)
         }
-        SquareButton("+", onClick = { controller.adjustZoom(0.1f) })
-        ToolButton(strings.text(StringKey.FitWindow), false, controller::fitToViewport)
-        ToolButton(strings.text(StringKey.FitSelection), false, controller::fitSelectionToViewport, enabled = controller.selectedRegion != null)
-        ToolButton(strings.text(StringKey.GridToggle), controller.showGrid, controller::toggleGrid)
+        IconToolButton(ToolbarIcon.ZoomIn, "放大", active = false) { controller.adjustZoom(0.1f) }
+        IconToolButton(ToolbarIcon.FitWindow, strings.text(StringKey.FitWindow), active = false, onClick = controller::fitToViewport)
+        IconToolButton(
+            ToolbarIcon.FitSelection,
+            strings.text(StringKey.FitSelection),
+            active = false,
+            enabled = controller.selectedRegion != null,
+            onClick = controller::fitSelectionToViewport
+        )
+        IconToolButton(ToolbarIcon.Grid, strings.text(StringKey.GridToggle), active = controller.showGrid, onClick = controller::toggleGrid)
     }
+}
+
+@Composable
+private fun IconToolButton(
+    icon: ToolbarIcon,
+    contentDescription: String,
+    active: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Box(
+        Modifier
+            .width(36.dp)
+            .height(36.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(if (active) ControlActive else ControlBg)
+            .border(1.dp, if (active) Color(0xFF65A7FF) else Border, RoundedCornerShape(7.dp))
+            .alpha(if (enabled) 1f else 0.42f)
+            .clickable(enabled = enabled, onClickLabel = contentDescription, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.fillMaxSize().padding(8.dp)) {
+            drawToolbarIcon(icon, if (active) Color(0xFFDBE5FF) else Color.White)
+        }
+    }
+}
+
+private enum class ToolbarIcon {
+    Select,
+    Move,
+    Draw,
+    Magic,
+    Eyedropper,
+    Undo,
+    Redo,
+    Clear,
+    ZoomOut,
+    ZoomIn,
+    FitWindow,
+    FitSelection,
+    Grid
+}
+
+private fun DrawScope.drawToolbarIcon(icon: ToolbarIcon, color: Color) {
+    val stroke = Stroke(width = 2.1f, cap = StrokeCap.Round)
+    val w = size.width
+    val h = size.height
+    when (icon) {
+        ToolbarIcon.Select -> {
+            val path = Path().apply {
+                moveTo(w * 0.18f, h * 0.12f)
+                lineTo(w * 0.78f, h * 0.55f)
+                lineTo(w * 0.5f, h * 0.61f)
+                lineTo(w * 0.66f, h * 0.9f)
+                lineTo(w * 0.53f, h * 0.96f)
+                lineTo(w * 0.37f, h * 0.68f)
+                lineTo(w * 0.18f, h * 0.86f)
+                close()
+            }
+            drawPath(path, color)
+        }
+        ToolbarIcon.Move -> {
+            drawLine(color, Offset(w * 0.5f, h * 0.08f), Offset(w * 0.5f, h * 0.92f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.08f, h * 0.5f), Offset(w * 0.92f, h * 0.5f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.5f, h * 0.08f), Offset(w * 0.38f, h * 0.22f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.5f, h * 0.08f), Offset(w * 0.62f, h * 0.22f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.5f, h * 0.92f), Offset(w * 0.38f, h * 0.78f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.5f, h * 0.92f), Offset(w * 0.62f, h * 0.78f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.08f, h * 0.5f), Offset(w * 0.22f, h * 0.38f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.08f, h * 0.5f), Offset(w * 0.22f, h * 0.62f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.92f, h * 0.5f), Offset(w * 0.78f, h * 0.38f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.92f, h * 0.5f), Offset(w * 0.78f, h * 0.62f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+        }
+        ToolbarIcon.Draw -> drawRect(color, topLeft = Offset(w * 0.18f, h * 0.2f), size = Size(w * 0.64f, h * 0.58f), style = stroke)
+        ToolbarIcon.Magic -> {
+            drawLine(color, Offset(w * 0.25f, h * 0.78f), Offset(w * 0.78f, h * 0.25f), strokeWidth = 2.4f, cap = StrokeCap.Round)
+            drawCircle(color, radius = 2.2f, center = Offset(w * 0.23f, h * 0.22f))
+            drawCircle(color, radius = 1.8f, center = Offset(w * 0.72f, h * 0.76f))
+            drawLine(color, Offset(w * 0.72f, h * 0.18f), Offset(w * 0.86f, h * 0.18f), strokeWidth = 1.7f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.79f, h * 0.11f), Offset(w * 0.79f, h * 0.25f), strokeWidth = 1.7f, cap = StrokeCap.Round)
+        }
+        ToolbarIcon.Eyedropper -> {
+            drawLine(color, Offset(w * 0.28f, h * 0.78f), Offset(w * 0.73f, h * 0.33f), strokeWidth = 3f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.64f, h * 0.24f), Offset(w * 0.82f, h * 0.42f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.2f, h * 0.86f), Offset(w * 0.36f, h * 0.86f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+        }
+        ToolbarIcon.Undo, ToolbarIcon.Redo -> drawHistoryIcon(color, icon == ToolbarIcon.Redo)
+        ToolbarIcon.Clear -> {
+            drawLine(color, Offset(w * 0.25f, h * 0.28f), Offset(w * 0.75f, h * 0.78f), strokeWidth = 2.3f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.75f, h * 0.28f), Offset(w * 0.25f, h * 0.78f), strokeWidth = 2.3f, cap = StrokeCap.Round)
+        }
+        ToolbarIcon.ZoomOut, ToolbarIcon.ZoomIn -> {
+            drawCircle(color, radius = w * 0.27f, center = Offset(w * 0.43f, h * 0.43f), style = stroke)
+            drawLine(color, Offset(w * 0.62f, h * 0.62f), Offset(w * 0.84f, h * 0.84f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.31f, h * 0.43f), Offset(w * 0.55f, h * 0.43f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            if (icon == ToolbarIcon.ZoomIn) {
+                drawLine(color, Offset(w * 0.43f, h * 0.31f), Offset(w * 0.43f, h * 0.55f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+            }
+        }
+        ToolbarIcon.FitWindow -> {
+            drawRect(color, topLeft = Offset(w * 0.18f, h * 0.18f), size = Size(w * 0.64f, h * 0.64f), style = stroke)
+            drawLine(color, Offset(w * 0.18f, h * 0.36f), Offset(w * 0.36f, h * 0.18f), strokeWidth = 2f, cap = StrokeCap.Round)
+            drawLine(color, Offset(w * 0.82f, h * 0.64f), Offset(w * 0.64f, h * 0.82f), strokeWidth = 2f, cap = StrokeCap.Round)
+        }
+        ToolbarIcon.FitSelection -> {
+            drawRect(color, topLeft = Offset(w * 0.26f, h * 0.26f), size = Size(w * 0.48f, h * 0.48f), style = stroke)
+            drawCircle(color, radius = 2.1f, center = Offset(w * 0.26f, h * 0.26f))
+            drawCircle(color, radius = 2.1f, center = Offset(w * 0.74f, h * 0.26f))
+            drawCircle(color, radius = 2.1f, center = Offset(w * 0.74f, h * 0.74f))
+            drawCircle(color, radius = 2.1f, center = Offset(w * 0.26f, h * 0.74f))
+        }
+        ToolbarIcon.Grid -> {
+            for (i in 0..2) {
+                val p = w * (0.24f + i * 0.26f)
+                drawLine(color, Offset(p, h * 0.18f), Offset(p, h * 0.82f), strokeWidth = 1.7f, cap = StrokeCap.Round)
+                drawLine(color, Offset(w * 0.18f, p), Offset(w * 0.82f, p), strokeWidth = 1.7f, cap = StrokeCap.Round)
+            }
+        }
+    }
+}
+
+private fun DrawScope.drawHistoryIcon(color: Color, redo: Boolean) {
+    val w = size.width
+    val h = size.height
+    val startX = if (redo) w * 0.28f else w * 0.72f
+    val endX = if (redo) w * 0.72f else w * 0.28f
+    drawArc(
+        color = color,
+        startAngle = if (redo) -130f else -50f,
+        sweepAngle = if (redo) 260f else -260f,
+        useCenter = false,
+        topLeft = Offset(w * 0.18f, h * 0.2f),
+        size = Size(w * 0.64f, h * 0.58f),
+        style = Stroke(width = 2.1f, cap = StrokeCap.Round)
+    )
+    drawLine(color, Offset(endX, h * 0.28f), Offset(startX, h * 0.28f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+    drawLine(color, Offset(endX, h * 0.28f), Offset(endX + if (redo) -w * 0.1f else w * 0.1f, h * 0.16f), strokeWidth = 2.1f, cap = StrokeCap.Round)
+    drawLine(color, Offset(endX, h * 0.28f), Offset(endX + if (redo) -w * 0.1f else w * 0.1f, h * 0.4f), strokeWidth = 2.1f, cap = StrokeCap.Round)
 }
 
 @Composable
@@ -365,13 +535,28 @@ fun AdvancedSettingsDialog(controller: AppController) {
         title = { Text(strings.text(StringKey.AdvancedSettings), color = Color.White) },
         backgroundColor = Panel,
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 SmallCheck(strings.text(StringKey.KeepOriginalSize), controller.keepOriginalSize, controller::updateKeepOriginalSize)
                 Text(strings.text(StringKey.FixedSize), color = Color.White, fontSize = 13.sp)
                 CompactTextField(controller.fixedSizeText, controller::updateFixedSizeText, suffix = "px")
                 SmallCheck(strings.text(StringKey.OverwriteExisting), controller.overwriteExisting, controller::updateOverwriteExisting)
                 SmallCheck("持续学习训练集", controller.continuousTrainingEnabled, controller::updateContinuousTrainingEnabled)
-                Text("开启后，识别和导出确认的区域会追加到训练集，并自动训练为下一次识别使用的新模型。", color = TextDim, fontSize = 12.sp)
+                Text("开启后，只有用户手动调整过选框并导出确认，才会将确认后的选框结果追加到训练集。", color = TextDim, fontSize = 12.sp)
+                Text("目录", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton("运行目录", controller::openRuntimeDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                    GhostButton("输出目录", controller::openOutputDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton("训练集", controller::openTrainingSetDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                    GhostButton("模型", controller::openModelDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GhostButton("Python", controller::openPythonRuntimeDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                    GhostButton("Native", controller::openNativeRuntimeDirectory, modifier = Modifier.weight(1f).height(36.dp))
+                }
+                GhostButton("清理内置运行文件", controller::clearRuntimeGeneratedFiles, modifier = Modifier.fillMaxWidth().height(36.dp))
+                Text("删除应用释放出的脚本、模型、训练样本和 native 文件；内置资源仍保留在安装包内。", color = TextDim, fontSize = 12.sp)
             }
         },
         confirmButton = {
@@ -516,8 +701,8 @@ private fun RegionDeleteButton(onClick: () -> Unit) {
 
 @Composable
 private fun RegionThumbnail(region: CropRegion, controller: AppController, modifier: Modifier = Modifier) {
-    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height) {
-        controller.image?.safeCrop(region)?.toComposeImageBitmap()
+    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height, region.points) {
+        controller.image?.let { previewCropper.cropPreview(it, region).toComposeImageBitmap() }
     }
 
     Box(
@@ -544,8 +729,8 @@ private fun RegionThumbnail(region: CropRegion, controller: AppController, modif
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
-    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height) {
-        controller.image?.safeCrop(region)?.toComposeImageBitmap()
+    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height, region.points) {
+        controller.image?.let { previewCropper.cropPreview(it, region).toComposeImageBitmap() }
     }
     if (bitmap == null) return
 
@@ -651,11 +836,5 @@ fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
     }
 }
 
-private fun java.awt.image.BufferedImage.safeCrop(region: CropRegion): java.awt.image.BufferedImage {
-    val x = region.x.coerceIn(0, width - 1)
-    val y = region.y.coerceIn(0, height - 1)
-    val cropWidth = region.width.coerceAtMost(width - x).coerceAtLeast(1)
-    val cropHeight = region.height.coerceAtMost(height - y).coerceAtLeast(1)
-    return getSubimage(x, y, cropWidth, cropHeight)
-}
+private val previewCropper = IconExporter()
 

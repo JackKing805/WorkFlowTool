@@ -75,7 +75,9 @@ def main():
         print(json.dumps(metadata, ensure_ascii=False))
         return
 
-    model = YOLO("yolov8n.pt")
+    previous_best = output_dir / "runs" / "weights" / "best.pt"
+    model_source = previous_best if previous_best.exists() else "yolov8n.pt"
+    model = YOLO(str(model_source))
     result = model.train(
         data=str(yolo_root / "dataset.yaml"),
         epochs=args.epochs,
@@ -95,6 +97,7 @@ def main():
         "status": "trained",
         "records": len(records),
         "model": str(best),
+        "base_model": str(model_source),
         "result": str(result.save_dir),
     }
     (output_dir / "training_manifest.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")

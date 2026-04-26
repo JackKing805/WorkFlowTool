@@ -78,6 +78,9 @@ data class ExportConfig(
     val customPrefix: String = "icon",
     val keepOriginalSize: Boolean = true,
     val trimTransparentPadding: Boolean = false,
+    val removeBackgroundToTransparent: Boolean = false,
+    val backgroundArgb: Int = 0,
+    val backgroundTolerance: Int = 20,
     val padToSquare: Boolean = false,
     val fixedSize: Int? = null,
     val overwriteExisting: Boolean = false
@@ -104,7 +107,8 @@ enum class ToolMode {
     Select,
     Move,
     Draw,
-    Magic
+    Magic,
+    Eyedropper
 }
 
 data class GridConfig(

@@ -30,9 +30,12 @@ int32_t estimate_edge_background(const NativeImageBuffer& image, const NativeDet
     const int width = image.width;
     const int height = image.height;
     const int edge = std::max(1, std::min(config.edge_sample_width, std::max(1, std::min(width, height) / 2)));
+    const int corner = std::max(edge, std::min({width, height, 24}));
     std::unordered_map<int32_t, int> buckets;
     std::vector<int32_t> samples;
+    std::vector<int32_t> corner_samples;
     samples.reserve(static_cast<size_t>(width * 2 + height * 2));
+    corner_samples.reserve(static_cast<size_t>(corner * corner * 4));
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
@@ -41,6 +44,13 @@ int32_t estimate_edge_background(const NativeImageBuffer& image, const NativeDet
                 const int32_t bucket = ((alpha(argb) / 24) << 24) | ((red(argb) / 24) << 16) | ((green(argb) / 24) << 8) | (blue(argb) / 24);
                 buckets[bucket] += 1;
                 samples.push_back(argb);
+                if ((x < corner && y < corner) ||
+                    (x >= width - corner && y < corner) ||
+                    (x < corner && y >= height - corner) ||
+                    (x >= width - corner && y >= height - corner)) {
+                    corner_samples.push_back(argb);
+                    buckets[bucket] += 3;
+                }
             }
         }
     }
@@ -57,17 +67,40 @@ int32_t estimate_edge_background(const NativeImageBuffer& image, const NativeDet
     }
 
     long long a = 0, r = 0, g = 0, b = 0, count = 0;
-    for (const int32_t argb : samples) {
-        const int32_t bucket = ((alpha(argb) / 24) << 24) | ((red(argb) / 24) << 16) | ((green(argb) / 24) << 8) | (blue(argb) / 24);
-        if (bucket != best_bucket) continue;
-        a += alpha(argb);
-        r += red(argb);
-        g += green(argb);
-        b += blue(argb);
-        count += 1;
-    }
+    auto accumulate_bucket = [&](const std::vector<int32_t>& values) {
+        for (const int32_t argb : values) {
+            const int32_t bucket = ((alpha(argb) / 24) << 24) | ((red(argb) / 24) << 16) | ((green(argb) / 24) << 8) | (blue(argb) / 24);
+            if (bucket != best_bucket) continue;
+            a += alpha(argb);
+            r += red(argb);
+            g += green(argb);
+            b += blue(argb);
+            count += 1;
+        }
+    };
+    accumulate_bucket(corner_samples.empty() ? samples : corner_samples);
+    if (count < 4) accumulate_bucket(samples);
     if (count == 0) return samples.front();
-    return static_cast<int32_t>(((a / count) << 24) | ((r / count) << 16) | ((g / count) << 8) | (b / count));
+    int32_t estimate = static_cast<int32_t>(((a / count) << 24) | ((r / count) << 16) | ((g / count) << 8) | (b / count));
+
+    int close_count = 0;
+    for (const int32_t argb : samples) {
+        if (weighted_distance(argb, estimate) <= static_cast<float>(std::max(10, config.color_distance_threshold))) {
+            close_count += 1;
+        }
+    }
+    if (close_count < static_cast<int>(samples.size() * 0.18f) && !corner_samples.empty()) {
+        long long ca = 0, cr = 0, cg = 0, cb = 0;
+        for (const int32_t argb : corner_samples) {
+            ca += alpha(argb);
+            cr += red(argb);
+            cg += green(argb);
+            cb += blue(argb);
+        }
+        const long long c = static_cast<long long>(corner_samples.size());
+        estimate = static_cast<int32_t>(((ca / c) << 24) | ((cr / c) << 16) | ((cg / c) << 8) | (cb / c));
+    }
+    return estimate;
 }
 
 std::vector<RegionWork> trace_regions(const std::vector<uint8_t>& mask, int width, int height, const NativeDetectionConfig& config, int* connected) {

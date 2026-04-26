@@ -14,6 +14,7 @@ import javax.imageio.ImageIO
 import kotlin.io.path.exists
 import kotlin.io.path.nameWithoutExtension
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class IconExporter {
     fun export(
@@ -28,7 +29,7 @@ class IconExporter {
 
         regions.filter { it.visible }.forEachIndexed { index, region ->
             try {
-                val cropped = crop(image, region)
+                val cropped = cropPreview(image, region)
                 val processed = process(cropped, config)
                 val output = nextOutputPath(sourceFileName, index + 1, config)
                 if (output.exists() && !config.overwriteExisting) {
@@ -51,20 +52,21 @@ class IconExporter {
 
     fun exportSingle(image: BufferedImage, region: CropRegion, config: ExportConfig, output: java.nio.file.Path): Boolean {
         output.parent?.let(Files::createDirectories)
-        return writeImage(process(crop(image, region), config), output, config.outputFormat)
+        return writeImage(process(cropPreview(image, region), config), output, config.outputFormat)
     }
 
-    private fun crop(image: BufferedImage, region: CropRegion): BufferedImage {
+    fun cropPreview(image: BufferedImage, region: CropRegion): BufferedImage {
         val x = region.x.coerceIn(0, image.width - 1)
         val y = region.y.coerceIn(0, image.height - 1)
         val width = region.width.coerceAtMost(image.width - x).coerceAtLeast(1)
         val height = region.height.coerceAtMost(image.height - y).coerceAtLeast(1)
-        if (region.points.isEmpty()) {
+        val regionPoints = region.editPoints
+        if (regionPoints.size < 3) {
             return image.getSubimage(x, y, width, height)
         }
 
         val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val points = region.points.map {
+        val points = regionPoints.map {
             RegionPoint(
                 x = it.x.coerceIn(x, x + width) - x,
                 y = it.y.coerceIn(y, y + height) - y
@@ -95,7 +97,8 @@ class IconExporter {
     }
 
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {
-        var image = if (config.trimTransparentPadding) trimTransparent(input) else copy(input)
+        var image = if (config.removeBackgroundToTransparent) removeBackground(input, config.backgroundArgb, config.backgroundTolerance) else copy(input)
+        if (config.trimTransparentPadding) image = trimTransparent(image)
         if (config.padToSquare) image = padToSquare(image)
         config.fixedSize?.takeIf { it > 0 && !config.keepOriginalSize }?.let { size ->
             image = resize(image, size, size)
@@ -109,6 +112,31 @@ class IconExporter {
         graphics.drawImage(input, 0, 0, null)
         graphics.dispose()
         return output
+    }
+
+    private fun removeBackground(input: BufferedImage, backgroundArgb: Int, tolerance: Int): BufferedImage {
+        val output = BufferedImage(input.width, input.height, BufferedImage.TYPE_INT_ARGB)
+        val toleranceScore = tolerance.coerceIn(0, 255)
+        for (y in 0 until input.height) {
+            for (x in 0 until input.width) {
+                val argb = input.getRGB(x, y)
+                val alpha = argb ushr 24
+                if (alpha == 0 || colorDistance(argb, backgroundArgb) <= toleranceScore) {
+                    output.setRGB(x, y, 0)
+                } else {
+                    output.setRGB(x, y, argb)
+                }
+            }
+        }
+        return output
+    }
+
+    private fun colorDistance(argb: Int, backgroundArgb: Int): Int {
+        val r = ((argb shr 16) and 255) - ((backgroundArgb shr 16) and 255)
+        val g = ((argb shr 8) and 255) - ((backgroundArgb shr 8) and 255)
+        val b = (argb and 255) - (backgroundArgb and 255)
+        val a = ((argb ushr 24) and 255) - ((backgroundArgb ushr 24) and 255)
+        return (kotlin.math.abs(r) * 0.35f + kotlin.math.abs(g) * 0.50f + kotlin.math.abs(b) * 0.15f + kotlin.math.abs(a) * 0.25f).roundToInt()
     }
 
     private fun trimTransparent(input: BufferedImage): BufferedImage {

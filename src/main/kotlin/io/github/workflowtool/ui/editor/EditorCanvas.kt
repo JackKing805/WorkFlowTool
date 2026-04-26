@@ -32,10 +32,13 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -52,6 +55,7 @@ import io.github.workflowtool.ui.theme.Panel
 import io.github.workflowtool.ui.theme.SoftBorder
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import java.awt.Cursor
 import java.util.UUID
 
 private enum class DragKind {
@@ -103,6 +107,7 @@ fun EditorCanvas(
     var workingRegions by remember { mutableStateOf<List<CropRegion>?>(null) }
     var draftRegion by remember { mutableStateOf<CropRegion?>(null) }
     var contextMenu by remember { mutableStateOf<CanvasContextMenuState?>(null) }
+    var pointerPosition by remember { mutableStateOf<Offset?>(null) }
     val latestRegions by rememberUpdatedState(regions)
     val latestZoom by rememberUpdatedState(zoom)
     val latestViewportOffset by rememberUpdatedState(viewportOffset)
@@ -119,9 +124,25 @@ fun EditorCanvas(
             .clip(RoundedCornerShape(5.dp))
             .background(Panel)
             .border(1.dp, SoftBorder, RoundedCornerShape(5.dp))
+            .pointerHoverIcon(
+                if (backgroundPickArmed) PointerIcon(Cursor(Cursor.CROSSHAIR_CURSOR)) else PointerIcon.Default
+            )
             .onSizeChanged { onViewport(it.toSize()) }
             .onPointerEvent(PointerEventType.Press) { event ->
                 val change = event.changes.firstOrNull() ?: return@onPointerEvent
+                if (latestBackgroundPickArmed && event.buttons.isPrimaryPressed) {
+                    change.consume()
+                    contextMenu = null
+                    onBackgroundPick(screenToImage(change.position, latestViewportOffset, latestZoom))
+                    return@onPointerEvent
+                }
+                if (event.buttons.isPrimaryPressed) {
+                    val imagePoint = screenToImage(change.position, latestViewportOffset, latestZoom)
+                    val hit = findRegionHit(latestRegions, imagePoint)
+                    if (hit != null) {
+                        onSelect(hit.id, false)
+                    }
+                }
                 if (!event.buttons.isSecondaryPressed) return@onPointerEvent
                 val imagePoint = screenToImage(change.position, latestViewportOffset, latestZoom)
                 val hit = findRegionHit(latestRegions, imagePoint)
@@ -143,6 +164,10 @@ fun EditorCanvas(
                     detectTapGestures(
                         onDoubleTap = { offset ->
                             val imagePoint = screenToImage(offset, latestViewportOffset, latestZoom)
+                            if (latestBackgroundPickArmed) {
+                                onBackgroundPick(imagePoint)
+                                return@detectTapGestures
+                            }
                             if (latestToolMode == ToolMode.Magic) {
                                 if (findRegionHit(latestRegions, imagePoint) != null) return@detectTapGestures
                                 onMagicSelect(imagePoint)
@@ -168,9 +193,11 @@ fun EditorCanvas(
                 }
                 .onPointerEvent(PointerEventType.Move) { event ->
                     val point = event.changes.firstOrNull()?.position ?: return@onPointerEvent
+                    pointerPosition = point
                     onHover(screenToImage(point, latestViewportOffset, latestZoom))
                 }
                 .onPointerEvent(PointerEventType.Exit) {
+                    pointerPosition = null
                     onHover(null)
                 }
                 .onPointerEvent(PointerEventType.Scroll) { event ->
@@ -182,6 +209,10 @@ fun EditorCanvas(
                     detectDragGestures(
                         onDragStart = { offset ->
                             val imagePoint = screenToImage(offset, latestViewportOffset, latestZoom)
+                            if (latestBackgroundPickArmed) {
+                                onBackgroundPick(imagePoint)
+                                return@detectDragGestures
+                            }
                             val handleHit = findHandleHit(latestRegions, imagePoint, latestZoom)
                             val hit = findRegionHit(latestRegions, imagePoint)
                             contextMenu = null
@@ -306,6 +337,10 @@ fun EditorCanvas(
             }
         }
 
+        if (backgroundPickArmed) {
+            pointerPosition?.let { EyedropperCursor(it) }
+        }
+
         visibleOverlayRegions.forEachIndexed { index, region ->
             Box(
                 Modifier.offset((region.x * zoom + viewportOffset.x + 1).roundToInt().dp, (region.y * zoom + viewportOffset.y + 1).roundToInt().dp)
@@ -364,6 +399,30 @@ fun EditorCanvas(
             }
         }
     }
+}
+
+@Composable
+private fun EyedropperCursor(position: Offset) {
+    Canvas(
+        Modifier.offset {
+            IntOffset((position.x + 12f).roundToInt(), (position.y + 12f).roundToInt())
+        }.size(28.dp)
+    ) {
+        drawEyedropperIcon()
+    }
+}
+
+private fun DrawScope.drawEyedropperIcon() {
+    val handle = Color(0xFF74A5FF)
+    val metal = Color.White
+    val shadow = Color(0x99000000)
+    drawLine(shadow, Offset(8f, 22f), Offset(23f, 7f), strokeWidth = 5.5f)
+    drawLine(handle, Offset(7f, 21f), Offset(22f, 6f), strokeWidth = 4.2f)
+    drawLine(metal, Offset(13f, 8f), Offset(20f, 15f), strokeWidth = 5.5f)
+    drawLine(Color(0xFF202A36), Offset(13f, 8f), Offset(20f, 15f), strokeWidth = 2.2f)
+    drawCircle(metal, radius = 4.2f, center = Offset(21f, 6f))
+    drawCircle(Color(0xFF202A36), radius = 2.1f, center = Offset(21f, 6f))
+    drawLine(metal, Offset(4f, 24f), Offset(9f, 19f), strokeWidth = 3f)
 }
 
 private data class CanvasContextMenuState(
@@ -571,9 +630,9 @@ private fun DrawScope.drawRegionOutline(region: CropRegion, zoom: Float, viewpor
 }
 
 private fun DrawScope.drawMagicMask(preview: MagicSelectionPreview, zoom: Float, viewportOffset: Offset) {
-    val fillColor = Color(0x4C3DB2FF)
-    val innerFillColor = Color(0x2D8ED1FF)
-    val edgeColor = Color(0xFFB9E2FF)
+    val fillColor = Color(0x183DB2FF)
+    val innerFillColor = Color(0x128ED1FF)
+    val edgeColor = Color(0xCCB9E2FF)
     val width = preview.imageWidth
     val height = preview.imageHeight
     val mask = preview.mask
@@ -595,11 +654,13 @@ private fun DrawScope.drawMagicMask(preview: MagicSelectionPreview, zoom: Float,
                 topLeft = Offset(x * zoom, y * zoom) + viewportOffset,
                 size = Size((endX - x + 1) * zoom, zoom)
             )
-            drawRect(
-                color = innerFillColor,
-                topLeft = Offset((x + 0.15f) * zoom, (y + 0.15f) * zoom) + viewportOffset,
-                size = Size((endX - x + 0.7f) * zoom, 0.7f * zoom)
-            )
+            if (zoom >= 4f) {
+                drawRect(
+                    color = innerFillColor,
+                    topLeft = Offset((x + 0.15f) * zoom, (y + 0.15f) * zoom) + viewportOffset,
+                    size = Size((endX - x + 0.7f) * zoom, 0.7f * zoom)
+                )
+            }
             if (y == 0 || !mask[(y - 1) * width + x]) {
                 drawLine(
                     color = edgeColor,

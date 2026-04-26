@@ -71,11 +71,15 @@ tasks.test {
 }
 
 tasks.processResources {
+    dependsOn(buildCppDetector)
+
     from("python_detector") {
         into("python_detector")
         include("detect_icons.py")
         include("make_training_set.py")
         include("train_icon_detector.py")
+        include("train_magic_model.py")
+        include("train_background_model.py")
         include("README.md")
         include("model/combined/runs/weights/best.pt")
         include("training_sets/test_actions/annotations.jsonl")

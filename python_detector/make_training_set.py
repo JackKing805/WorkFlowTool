@@ -24,6 +24,7 @@ def run_detector(image, disable_grid=False):
         "--bbox-padding",
         "3",
         "--merge-nearby-regions",
+        "--disable-model",
     ]
     if disable_grid:
         command.append("--disable-grid")

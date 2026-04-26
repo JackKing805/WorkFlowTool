@@ -4,6 +4,7 @@ import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.darkColors
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalDensity
@@ -27,6 +28,12 @@ import io.github.workflowtool.ui.theme.AppBg
 import io.github.workflowtool.ui.theme.Panel
 import java.awt.Dimension
 import java.awt.Point
+import java.awt.datatransfer.DataFlavor
+import java.awt.dnd.DnDConstants
+import java.awt.dnd.DropTarget
+import java.awt.dnd.DropTargetAdapter
+import java.awt.dnd.DropTargetDropEvent
+import java.io.File
 
 fun main() {
     FileKit.init(appId = "io.github.workflowtool")
@@ -45,6 +52,29 @@ fun main() {
         LaunchedEffect(Unit) {
             window.minimumSize = with(density) {
                 Dimension(layoutSpec.minWindowWidth.roundToPx(), layoutSpec.minWindowHeight.roundToPx())
+            }
+        }
+
+        DisposableEffect(window, controller) {
+            DropTarget(window, object : DropTargetAdapter() {
+                override fun drop(event: DropTargetDropEvent) {
+                    runCatching {
+                        if (!event.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+                            event.rejectDrop()
+                            return
+                        }
+                        event.acceptDrop(DnDConstants.ACTION_COPY)
+                        @Suppress("UNCHECKED_CAST")
+                        val files = event.transferable.getTransferData(DataFlavor.javaFileListFlavor) as List<File>
+                        controller.loadFilesAsync(files)
+                        event.dropComplete(true)
+                    }.onFailure {
+                        event.dropComplete(false)
+                    }
+                }
+            })
+            onDispose {
+                window.dropTarget = null
             }
         }
 

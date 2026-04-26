@@ -328,10 +328,86 @@ class AppControllerTest {
 
         controller.sampleBackgroundAt(androidx.compose.ui.geometry.Offset(1f, 1f))
 
-        assertEquals(2, detector.calls)
+        assertEquals(1, detector.calls)
         assertEquals("#FFF2F3F5", controller.activeBackgroundLabel)
+        controller.rebuildFromAuto(logResult = true)
+        assertEquals(2, detector.calls)
         assertTrue(detector.lastConfig.useManualBackground)
         assertEquals(0xFFF2F3F5.toInt(), detector.lastConfig.manualBackgroundArgb)
+    }
+
+    @Test
+    fun samplingBackgroundDoesNotResetEditedRegions() {
+        val controller = AppController(
+            detector = StaticDetector(listOf(CropRegion("auto", 1, 1, 8, 8))),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createManualBackgroundImageFile())
+        controller.replaceRegions("manual", listOf(CropRegion("1", 12, 12, 18, 18)))
+
+        controller.sampleBackgroundAt(androidx.compose.ui.geometry.Offset(1f, 1f))
+
+        assertEquals(1, controller.regions.size)
+        assertEquals(12, controller.regions.single().x)
+        assertEquals(18, controller.regions.single().width)
+        assertTrue(controller.hasManualEdits)
+    }
+
+    @Test
+    fun configChangesDoNotResetEditedRegions() {
+        val detector = CountingDetector()
+        val splitter = CountingSplitter()
+        val controller = AppController(
+            detector = detector,
+            splitter = splitter,
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createImageFile())
+        controller.replaceRegions("manual", listOf(CropRegion("1", 12, 12, 18, 18)))
+        val detectorCalls = detector.calls
+        val splitterCalls = splitter.calls
+
+        controller.updateDetectionConfig(controller.detectionConfig.copy(minWidth = controller.detectionConfig.minWidth + 1))
+        controller.updateGridConfig(controller.gridConfig.copy(columns = controller.gridConfig.columns + 1))
+
+        assertEquals(detectorCalls, detector.calls)
+        assertEquals(splitterCalls, splitter.calls)
+        assertEquals(1, controller.regions.size)
+        assertEquals(12, controller.regions.single().x)
+        assertEquals(18, controller.regions.single().width)
+        assertTrue(controller.hasManualEdits)
+    }
+
+    @Test
+    fun loadingMultipleImagesCreatesSingleSpacedCanvas() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFiles(
+            listOf(
+                createImageFile(width = 64, height = 32),
+                createImageFile(width = 32, height = 48)
+            )
+        )
+
+        assertEquals(2, controller.imageFiles.size)
+        assertEquals(192, controller.image?.width)
+        assertEquals(48, controller.image?.height)
     }
 
     @Test
