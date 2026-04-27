@@ -1,9 +1,30 @@
 import org.gradle.internal.os.OperatingSystem
+import java.io.File
 
 plugins {
     kotlin("jvm") version "2.3.20"
     id("org.jetbrains.compose") version "1.10.3"
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.20"
+}
+
+fun findExecutable(name: String): File? {
+    val path = System.getenv("PATH") ?: return null
+    val extensions = if (OperatingSystem.current().isWindows) {
+        val pathExt = System.getenv("PATHEXT")
+            ?.split(File.pathSeparatorChar)
+            ?.filter { it.isNotBlank() }
+            ?: listOf(".EXE", ".BAT", ".CMD")
+        pathExt + ""
+    } else {
+        listOf("")
+    }
+    return path
+        .split(File.pathSeparatorChar)
+        .asSequence()
+        .filter { it.isNotBlank() }
+        .map(::File)
+        .flatMap { dir -> extensions.asSequence().map { ext -> File(dir, "$name$ext") } }
+        .firstOrNull { it.isFile && it.canExecute() }
 }
 
 group = "io.github.workflowtool"
@@ -24,7 +45,8 @@ dependencies {
 val cppDetectorDir = layout.projectDirectory.dir("native/cpp_detector")
 val cppBuildDir = cppDetectorDir.dir("build")
 val cppReleaseDir = cppBuildDir.dir("release")
-val embedOpenCv = providers.gradleProperty("embedOpenCv").map(String::toBoolean).orElse(false)
+val hasCmake = findExecutable("cmake") != null
+val hasXcrun = findExecutable("xcrun") != null
 val cppLibraryName = when {
     OperatingSystem.current().isMacOsX -> "libcpp_detector.dylib"
     OperatingSystem.current().isWindows -> "cpp_detector.dll"
@@ -36,11 +58,7 @@ val configureCppDetector by tasks.registering(Exec::class) {
     group = "build"
     description = "Configures the C++ native detector used by the desktop app."
     workingDir = cppDetectorDir.asFile
-    val configureArgs = mutableListOf("cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release")
-    if (embedOpenCv.get()) {
-        configureArgs += "-DCPP_DETECTOR_FETCH_OPENCV=ON"
-    }
-    commandLine(configureArgs)
+    commandLine("cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release")
 
     inputs.file(cppDetectorDir.file("CMakeLists.txt"))
     inputs.files(
@@ -64,6 +82,65 @@ val buildCppDetector by tasks.registering(Exec::class) {
         }
     )
     outputs.file(cppLibraryFile)
+    doLast {
+        val nestedLibrary = cppReleaseDir.file("Release/$cppLibraryName").asFile
+        if (nestedLibrary.isFile && nestedLibrary != cppLibraryFile.asFile) {
+            cppReleaseDir.asFile.mkdirs()
+            nestedLibrary.copyTo(cppLibraryFile.asFile, overwrite = true)
+        }
+    }
+}
+
+val buildCppDetectorBuiltinMac by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds the C++ native detector directly with Apple clang on macOS."
+    workingDir = cppDetectorDir.asFile
+    doFirst {
+        cppReleaseDir.asFile.mkdirs()
+    }
+    commandLine(
+        "xcrun",
+        "clang++",
+        "-std=c++17",
+        "-O2",
+        "-dynamiclib",
+        "-fvisibility=hidden",
+        "src/cpp_detector.cpp",
+        "src/detector_backend_builtin.cpp",
+        "-o",
+        cppLibraryFile.asFile.absolutePath
+    )
+
+    inputs.files(
+        fileTree(cppDetectorDir.dir("src")) {
+            include("cpp_detector.cpp", "detector_backend_builtin.cpp", "detector_backend.h")
+        }
+    )
+    outputs.file(cppLibraryFile)
+}
+
+val buildCppDetectorForCurrentHost by tasks.registering {
+    group = "build"
+    description = "Builds the C++ native detector for the current host toolchain."
+
+    when {
+        OperatingSystem.current().isMacOsX && !hasCmake && hasXcrun -> dependsOn(buildCppDetectorBuiltinMac)
+        hasCmake -> dependsOn(buildCppDetector)
+        else -> doFirst {
+            throw GradleException(
+                "C++ detector build requires cmake, or on macOS can fall back to xcrun clang++. " +
+                    "Current PATH did not provide a supported toolchain."
+            )
+        }
+    }
+}
+
+val buildNativeDetector = providers.gradleProperty("buildNativeDetector").map(String::toBoolean).orElse(false)
+val shouldBuildNativeForLaunch = providers.provider {
+    gradle.startParameter.taskNames.any { taskName ->
+        val name = taskName.substringAfterLast(':')
+        name in setOf("run", "createDistributable", "packageDistributionForCurrentOS", "packageExe", "packageMsi")
+    }
 }
 
 tasks.test {
@@ -71,28 +148,22 @@ tasks.test {
 }
 
 tasks.processResources {
-    dependsOn(buildCppDetector)
+    if (buildNativeDetector.get() || shouldBuildNativeForLaunch.get()) {
+        dependsOn(buildCppDetectorForCurrentHost)
+    }
 
     from("python_detector") {
         into("python_detector")
-        include("detect_icons.py")
-        include("make_training_set.py")
-        include("train_icon_detector.py")
-        include("train_magic_model.py")
-        include("train_background_model.py")
-        include("README.md")
-        include("model/combined/runs/weights/best.pt")
-        include("training_sets/test_actions/annotations.jsonl")
-        include("training_sets/combined/annotations.jsonl")
+        include("**/*")
+        exclude("**/__pycache__/**")
     }
-    from("test.png") {
-        into("python_detector/seed_images")
+    from("third_party") {
+        into("third_party")
+        include("**/*")
     }
-    from("xunlian/icons.png") {
-        into("python_detector/seed_images")
-    }
-    from("xunlian/icons2.png") {
-        into("python_detector/seed_images")
+    from("scripts") {
+        into("scripts")
+        include("**/*")
     }
     from(cppReleaseDir) {
         into("native")
@@ -100,11 +171,9 @@ tasks.processResources {
     }
 }
 
-val buildNativeDetector = providers.gradleProperty("buildNativeDetector").map(String::toBoolean).orElse(false)
-
 tasks.matching { it.name in setOf("test", "run", "createDistributable", "packageDistributionForCurrentOS") }.configureEach {
-    if (buildNativeDetector.get()) {
-        dependsOn(buildCppDetector)
+    if (buildNativeDetector.get() || name == "run" || name in setOf("createDistributable", "packageDistributionForCurrentOS")) {
+        dependsOn(buildCppDetectorForCurrentHost)
     }
 }
 

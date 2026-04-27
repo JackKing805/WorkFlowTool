@@ -5,9 +5,15 @@ import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
+import io.github.workflowtool.model.RegionGroup
 import io.github.workflowtool.model.RegionPoint
+import io.github.workflowtool.model.resolveRegionGroup
+import io.github.workflowtool.model.resolveRegionGroups
+import java.awt.AlphaComposite
 import java.awt.Color
 import java.awt.RenderingHints
+import java.awt.geom.Area
+import java.awt.geom.Path2D
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import javax.imageio.ImageIO
@@ -15,6 +21,7 @@ import kotlin.io.path.exists
 import kotlin.io.path.nameWithoutExtension
 import kotlin.math.max
 import kotlin.math.roundToInt
+import java.util.ArrayDeque
 
 class IconExporter {
     fun export(
@@ -27,9 +34,15 @@ class IconExporter {
         val failures = mutableListOf<String>()
         var success = 0
 
-        regions.filter { it.visible }.forEachIndexed { index, region ->
+        val exportGroups = resolveRegionGroups(regions)
+            .filter { it.root.visible }
+            .ifEmpty {
+                regions.filter { it.visible }.map { RegionGroup(root = it, members = listOf(it), holes = emptyList()) }
+            }
+
+        exportGroups.forEachIndexed { index, group ->
             try {
-                val cropped = cropPreview(image, region)
+                val cropped = cropPreview(image, group.root, group.members)
                 val processed = process(cropped, config)
                 val output = nextOutputPath(sourceFileName, index + 1, config)
                 if (output.exists() && !config.overwriteExisting) {
@@ -43,57 +56,85 @@ class IconExporter {
                     success++
                 }
             } catch (error: Exception) {
-                failures += "Region ${region.id}: ${error.message ?: error::class.simpleName}"
+                failures += "Region ${group.root.id}: ${error.message ?: error::class.simpleName}"
             }
         }
 
         return ExportResult(successCount = success, failureCount = failures.size, failures = failures)
     }
 
-    fun exportSingle(image: BufferedImage, region: CropRegion, config: ExportConfig, output: java.nio.file.Path): Boolean {
+    fun exportSingle(
+        image: BufferedImage,
+        region: CropRegion,
+        allRegions: List<CropRegion>,
+        config: ExportConfig,
+        output: java.nio.file.Path
+    ): Boolean {
         output.parent?.let(Files::createDirectories)
-        return writeImage(process(cropPreview(image, region), config), output, config.outputFormat)
+        return writeImage(process(cropPreview(image, region, allRegions), config), output, config.outputFormat)
     }
 
-    fun cropPreview(image: BufferedImage, region: CropRegion): BufferedImage {
-        val x = region.x.coerceIn(0, image.width - 1)
-        val y = region.y.coerceIn(0, image.height - 1)
-        val width = region.width.coerceAtMost(image.width - x).coerceAtLeast(1)
-        val height = region.height.coerceAtMost(image.height - y).coerceAtLeast(1)
-        val regionPoints = region.editPoints
-        if (regionPoints.size < 3) {
+    fun cropPreview(image: BufferedImage, region: CropRegion, allRegions: List<CropRegion> = listOf(region)): BufferedImage {
+        val group = resolveRegionGroup(allRegions, region.id)?.let {
+            it.copy(
+                members = it.members.filter(CropRegion::visible),
+                holes = it.holes.filter(CropRegion::visible)
+            )
+        } ?: RegionGroup(root = region, members = listOf(region), holes = emptyList())
+        val outer = group.root
+        val x = outer.x.coerceIn(0, image.width - 1)
+        val y = outer.y.coerceIn(0, image.height - 1)
+        val width = outer.width.coerceAtMost(image.width - x).coerceAtLeast(1)
+        val height = outer.height.coerceAtMost(image.height - y).coerceAtLeast(1)
+        val regionPoints = outer.editPoints
+        if (regionPoints.size < 3 && group.holes.isEmpty()) {
             return image.getSubimage(x, y, width, height)
         }
 
-        val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val points = regionPoints.map {
-            RegionPoint(
-                x = it.x.coerceIn(x, x + width) - x,
-                y = it.y.coerceIn(y, y + height) - y
-            )
-        }
-        for (targetY in 0 until height) {
-            for (targetX in 0 until width) {
-                if (!containsPoint(points, targetX + 0.5f, targetY + 0.5f)) continue
-                output.setRGB(targetX, targetY, image.getRGB(x + targetX, y + targetY))
+        val source = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val sourceGraphics = source.createGraphics()
+        sourceGraphics.drawImage(image, 0, 0, width, height, x, y, x + width, y + height, null)
+        sourceGraphics.dispose()
+
+        val compositeArea = Area(polygonPath(normalizePoints(outer, x, y, width, height)))
+        group.holes
+            .filter { it.id != outer.id }
+            .forEach { hole ->
+                compositeArea.subtract(Area(polygonPath(normalizePoints(hole, x, y, width, height))))
             }
-        }
+
+        val mask = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val maskGraphics = mask.createGraphics()
+        maskGraphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        maskGraphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        maskGraphics.color = Color.WHITE
+        maskGraphics.fill(compositeArea)
+        maskGraphics.dispose()
+
+        val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val outputGraphics = output.createGraphics()
+        outputGraphics.drawImage(source, 0, 0, null)
+        outputGraphics.composite = AlphaComposite.DstIn
+        outputGraphics.drawImage(mask, 0, 0, null)
+        outputGraphics.dispose()
         return output
     }
 
-    private fun containsPoint(points: List<RegionPoint>, x: Float, y: Float): Boolean {
-        if (points.size < 3) return false
-        var inside = false
-        var previous = points.last()
-        for (current in points) {
-            val crosses = (current.y > y) != (previous.y > y)
-            if (crosses) {
-                val intersectionX = (previous.x - current.x) * (y - current.y) / (previous.y - current.y).toFloat() + current.x
-                if (x < intersectionX) inside = !inside
-            }
-            previous = current
+    private fun normalizePoints(region: CropRegion, offsetX: Int, offsetY: Int, width: Int, height: Int): List<RegionPoint> {
+        return region.editPoints.map {
+            RegionPoint(
+                x = it.x.coerceIn(offsetX, offsetX + width) - offsetX,
+                y = it.y.coerceIn(offsetY, offsetY + height) - offsetY
+            )
         }
-        return inside
+    }
+
+    private fun polygonPath(points: List<RegionPoint>): Path2D.Float {
+        return Path2D.Float().apply {
+            moveTo(points.first().x.toFloat(), points.first().y.toFloat())
+            points.drop(1).forEach { lineTo(it.x.toFloat(), it.y.toFloat()) }
+            closePath()
+        }
     }
 
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {
@@ -117,18 +158,85 @@ class IconExporter {
     private fun removeBackground(input: BufferedImage, backgroundArgb: Int, tolerance: Int): BufferedImage {
         val output = BufferedImage(input.width, input.height, BufferedImage.TYPE_INT_ARGB)
         val toleranceScore = tolerance.coerceIn(0, 255)
+        val softness = max(10, (toleranceScore * 0.8f).roundToInt())
+        val connectedBackground = edgeConnectedBackground(input, backgroundArgb, toleranceScore)
         for (y in 0 until input.height) {
             for (x in 0 until input.width) {
                 val argb = input.getRGB(x, y)
-                val alpha = argb ushr 24
-                if (alpha == 0 || colorDistance(argb, backgroundArgb) <= toleranceScore) {
+                val sourceAlpha = argb ushr 24 and 0xFF
+                if (sourceAlpha == 0) {
                     output.setRGB(x, y, 0)
-                } else {
-                    output.setRGB(x, y, argb)
+                    continue
                 }
+                val distance = colorDistance(argb, backgroundArgb)
+                val index = y * input.width + x
+                if (connectedBackground[index] && distance <= toleranceScore) {
+                    output.setRGB(x, y, 0)
+                    continue
+                }
+                val shouldFeather = distance < toleranceScore + softness && touchesConnectedBackground(connectedBackground, input.width, input.height, x, y)
+                val featheredAlpha = if (!shouldFeather) {
+                    sourceAlpha
+                } else {
+                    val ratio = (distance - toleranceScore).toFloat() / softness.toFloat()
+                    (sourceAlpha * ratio.coerceIn(0f, 1f)).roundToInt().coerceIn(0, sourceAlpha)
+                }
+                output.setRGB(x, y, (featheredAlpha shl 24) or (argb and 0x00FFFFFF))
             }
         }
         return output
+    }
+
+    private fun edgeConnectedBackground(input: BufferedImage, backgroundArgb: Int, toleranceScore: Int): BooleanArray {
+        val width = input.width
+        val height = input.height
+        val visited = BooleanArray(width * height)
+        val queue = ArrayDeque<Int>()
+
+        fun enqueue(x: Int, y: Int) {
+            if (x !in 0 until width || y !in 0 until height) return
+            val index = y * width + x
+            if (visited[index]) return
+            val argb = input.getRGB(x, y)
+            val alpha = argb ushr 24 and 0xFF
+            if (alpha == 0 || colorDistance(argb, backgroundArgb) <= toleranceScore) {
+                visited[index] = true
+                queue.add(index)
+            }
+        }
+
+        for (x in 0 until width) {
+            enqueue(x, 0)
+            enqueue(x, height - 1)
+        }
+        for (y in 0 until height) {
+            enqueue(0, y)
+            enqueue(width - 1, y)
+        }
+
+        while (!queue.isEmpty()) {
+            val index = queue.removeFirst()
+            val x = index % width
+            val y = index / width
+            enqueue(x - 1, y)
+            enqueue(x + 1, y)
+            enqueue(x, y - 1)
+            enqueue(x, y + 1)
+        }
+
+        return visited
+    }
+
+    private fun touchesConnectedBackground(mask: BooleanArray, width: Int, height: Int, x: Int, y: Int): Boolean {
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                if (dx == 0 && dy == 0) continue
+                val nx = x + dx
+                val ny = y + dy
+                if (nx in 0 until width && ny in 0 until height && mask[ny * width + nx]) return true
+            }
+        }
+        return false
     }
 
     private fun colorDistance(argb: Int, backgroundArgb: Int): Int {

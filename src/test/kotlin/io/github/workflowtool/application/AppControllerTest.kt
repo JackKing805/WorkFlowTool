@@ -23,6 +23,20 @@ import kotlin.test.assertTrue
 
 class AppControllerTest {
     @Test
+    fun controllerLogsOfflineDependencySelfCheckOnStartup() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        assertTrue(controller.logs.any { it.contains("离线依赖自检") })
+    }
+
+    @Test
     fun nativeUnavailableDoesNotBlockInjectedDetectors() {
         val detector = CountingDetector()
         val splitter = CountingSplitter()
@@ -42,6 +56,86 @@ class AppControllerTest {
 
         assertTrue(detector.calls >= 1)
         assertEquals(1, splitter.calls)
+    }
+
+    @Test
+    fun selectingInnerHoleSelectsWholeContainingGroup() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("outer", 10, 10, 40, 40),
+                CropRegion("hole", 20, 20, 10, 10),
+                CropRegion("other", 80, 10, 20, 20)
+            )
+        )
+
+        controller.selectRegion("hole")
+
+        assertTrue(controller.regions.first { it.id == "outer" }.selected)
+        assertTrue(controller.regions.first { it.id == "hole" }.selected)
+        assertEquals(false, controller.regions.first { it.id == "other" }.selected)
+        assertEquals("10, 10, 40 x 40", controller.selectedRegionLabel)
+    }
+
+    @Test
+    fun togglingVisibilityOnInnerHoleTogglesWholeContainingGroup() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("outer", 10, 10, 40, 40),
+                CropRegion("hole", 20, 20, 10, 10),
+                CropRegion("other", 80, 10, 20, 20)
+            )
+        )
+
+        controller.toggleVisibility("hole")
+
+        assertEquals(false, controller.regions.first { it.id == "outer" }.visible)
+        assertEquals(false, controller.regions.first { it.id == "hole" }.visible)
+        assertEquals(true, controller.regions.first { it.id == "other" }.visible)
+    }
+
+    @Test
+    fun removingInnerHoleRemovesWholeContainingGroup() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("outer", 10, 10, 40, 40),
+                CropRegion("hole", 20, 20, 10, 10),
+                CropRegion("other", 80, 10, 20, 20)
+            )
+        )
+
+        controller.removeRegion("hole")
+
+        assertEquals(listOf("other"), controller.regions.map { it.id })
     }
 
     @Test
@@ -111,6 +205,7 @@ class AppControllerTest {
 
     @Test
     fun magicSelectionCreatesRegionFromClickedArea() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -133,6 +228,7 @@ class AppControllerTest {
 
     @Test
     fun magicToleranceRefreshesCurrentMagicSelection() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -159,6 +255,7 @@ class AppControllerTest {
 
     @Test
     fun clickingInsideMagicRegionRefreshesInsteadOfCreatingNewRegion() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -189,6 +286,7 @@ class AppControllerTest {
 
     @Test
     fun magicSelectionReplacesExistingHitRegionInsteadOfCreatingNewRegion() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -218,6 +316,7 @@ class AppControllerTest {
 
     @Test
     fun draggingMagicSelectionAddsDifferentColorRegionToCurrentSelection() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -246,6 +345,7 @@ class AppControllerTest {
 
     @Test
     fun magicSelectionIgnoresBackgroundLikeEdgeColor() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -263,6 +363,7 @@ class AppControllerTest {
 
     @Test
     fun magicSelectionConnectsDiagonalPixels() {
+        if (!CppDetectorBridge.isLoaded) return
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),

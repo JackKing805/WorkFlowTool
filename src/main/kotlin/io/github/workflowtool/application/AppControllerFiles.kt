@@ -10,7 +10,10 @@ fun AppController.chooseImageFile() {
 }
 
 fun AppController.chooseOutputDirectory() {
-    DesktopPlatform.chooseDirectory()?.let { outputDirectory = it.toPath() }
+    DesktopPlatform.chooseDirectory()?.let {
+        outputDirectory = it.toPath()
+        persistSettings()
+    }
 }
 
 fun AppController.openOutputDirectory() {
@@ -53,6 +56,7 @@ private fun AppController.loadFileContent(file: File) {
         hoveredImagePoint = null
         backgroundPickArmed = false
         magicSelectionPreview = null
+        rememberRecentFile(file)
         log("图片加载成功：${file.name}，${loaded.width} x ${loaded.height}")
         regenerateBaseSafely(logResult = true)
     }.onFailure {
@@ -64,6 +68,16 @@ fun AppController.loadFileAsync(file: File) {
     runBusy("正在导入并识别图片...") {
         loadFile(file)
     }
+}
+
+fun AppController.loadRecentFileAsync(file: File) {
+    if (!file.isFile) {
+        recentFiles = AppSettingsStore.sanitizedRecentFiles(recentFiles.map { it.toPath() }).map { it.toFile() }
+        persistSettings()
+        log("历史文件不存在：${file.path}")
+        return
+    }
+    loadFileAsync(file)
 }
 
 fun AppController.loadFilesAsync(files: List<File>) {

@@ -3,6 +3,7 @@
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import io.github.workflowtool.model.CropRegion
+import io.github.workflowtool.model.primaryRegionFor
 
 fun AppController.adjustZoom(delta: Float) {
     if (delta == 0f) return
@@ -80,12 +81,13 @@ fun AppController.fitSelectionToViewport() {
 }
 
 fun AppController.focusRegion(regionId: String, fit: Boolean = false) {
-    val region = regions.lastOrNull { it.id == regionId } ?: return
+    val region = primaryRegionFor(regions, regionId) ?: regions.lastOrNull { it.id == regionId } ?: return
     focusRegion(region, fit)
 }
 
 fun AppController.toggleGrid() {
     showGrid = !showGrid
+    persistSettings()
 }
 
 private fun AppController.focusRegion(region: CropRegion, fit: Boolean) {

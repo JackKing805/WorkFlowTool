@@ -1,190 +1,509 @@
 #include "detector_backend.h"
 
-float weighted_distance(int32_t a, int32_t b) {
-    const float dr = static_cast<float>(red(a) - red(b));
-    const float dg = static_cast<float>(green(a) - green(b));
-    const float db = static_cast<float>(blue(a) - blue(b));
-    const float luma = std::abs(dr * 0.30f + dg * 0.59f + db * 0.11f);
-    return luma + std::abs(dr) * 0.35f + std::abs(db) * 0.15f;
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <queue>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace workflowtool {
+namespace {
+
+constexpr int kModeAlphaMask = 0;
+constexpr int kModeSolidBackground = 1;
+constexpr int kModeFallbackBackground = 2;
+
+struct Rgba {
+    int r = 0;
+    int g = 0;
+    int b = 0;
+    int a = 0;
+};
+
+struct RowSpan {
+    int y = 0;
+    int left = 0;
+    int right = 0;
+};
+
+struct Component {
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    int pixelCount = 0;
+    long long sumR = 0;
+    long long sumG = 0;
+    long long sumB = 0;
+    long long sumA = 0;
+    std::vector<RowSpan> rows;
+};
+
+struct DetectionContext {
+    Rgba background;
+    int mode = kModeSolidBackground;
+    int sampleCount = 0;
+    int candidatePixels = 0;
+    std::vector<std::uint8_t> mask;
+};
+
+struct RegionModel {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    float score = 0.0f;
+    std::vector<NativePoint> points;
+};
+
+struct BucketStats {
+    int count = 0;
+    long long sumR = 0;
+    long long sumG = 0;
+    long long sumB = 0;
+    long long sumA = 0;
+};
+
+bool is_inside(int x, int y, int width, int height) {
+    return x >= 0 && y >= 0 && x < width && y < height;
 }
 
-float magic_distance(int32_t a, int32_t b) {
-    const float r = static_cast<float>(std::abs(red(a) - red(b)));
-    const float g = static_cast<float>(std::abs(green(a) - green(b)));
-    const float bl = static_cast<float>(std::abs(blue(a) - blue(b)));
-    const float la = red(a) * 0.299f + green(a) * 0.587f + blue(a) * 0.114f;
-    const float lb = red(b) * 0.299f + green(b) * 0.587f + blue(b) * 0.114f;
-    return r * 0.85f + g * 1.1f + bl * 0.75f + std::abs(la - lb) * 0.65f;
-}
-
-bool matches_background(int32_t argb, int32_t background, const NativeDetectionConfig& config) {
-    const int alpha_threshold = std::max(0, config.alpha_threshold);
-    const int a = alpha(argb);
-    const int bg_a = alpha(background);
-    if (a <= alpha_threshold && bg_a <= alpha_threshold) return true;
-    if (std::abs(a - bg_a) > std::max(18, alpha_threshold * 3)) return false;
-    return weighted_distance(argb, background) <= static_cast<float>(std::max(12, config.color_distance_threshold));
-}
-
-int32_t estimate_edge_background(const NativeImageBuffer& image, const NativeDetectionConfig& config, int* sample_count) {
-    const int width = image.width;
-    const int height = image.height;
-    const int edge = std::max(1, std::min(config.edge_sample_width, std::max(1, std::min(width, height) / 2)));
-    const int corner = std::max(edge, std::min({width, height, 24}));
-    std::unordered_map<int32_t, int> buckets;
-    std::vector<int32_t> samples;
-    std::vector<int32_t> corner_samples;
-    samples.reserve(static_cast<size_t>(width * 2 + height * 2));
-    corner_samples.reserve(static_cast<size_t>(corner * corner * 4));
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (x < edge || y < edge || x >= width - edge || y >= height - edge) {
-                const int32_t argb = image.pixels[idx(x, y, width)];
-                const int32_t bucket = ((alpha(argb) / 24) << 24) | ((red(argb) / 24) << 16) | ((green(argb) / 24) << 8) | (blue(argb) / 24);
-                buckets[bucket] += 1;
-                samples.push_back(argb);
-                if ((x < corner && y < corner) ||
-                    (x >= width - corner && y < corner) ||
-                    (x < corner && y >= height - corner) ||
-                    (x >= width - corner && y >= height - corner)) {
-                    corner_samples.push_back(argb);
-                    buckets[bucket] += 3;
-                }
-            }
-        }
-    }
-    if (sample_count) *sample_count = static_cast<int>(samples.size());
-    if (samples.empty()) return 0;
-
-    int32_t best_bucket = 0;
-    int best_count = -1;
-    for (const auto& entry : buckets) {
-        if (entry.second > best_count) {
-            best_bucket = entry.first;
-            best_count = entry.second;
-        }
-    }
-
-    long long a = 0, r = 0, g = 0, b = 0, count = 0;
-    auto accumulate_bucket = [&](const std::vector<int32_t>& values) {
-        for (const int32_t argb : values) {
-            const int32_t bucket = ((alpha(argb) / 24) << 24) | ((red(argb) / 24) << 16) | ((green(argb) / 24) << 8) | (blue(argb) / 24);
-            if (bucket != best_bucket) continue;
-            a += alpha(argb);
-            r += red(argb);
-            g += green(argb);
-            b += blue(argb);
-            count += 1;
-        }
+Rgba decode_argb(std::int32_t argb) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(argb);
+    return Rgba{
+        static_cast<int>((bits >> 16U) & 0xFFU),
+        static_cast<int>((bits >> 8U) & 0xFFU),
+        static_cast<int>(bits & 0xFFU),
+        static_cast<int>((bits >> 24U) & 0xFFU),
     };
-    accumulate_bucket(corner_samples.empty() ? samples : corner_samples);
-    if (count < 4) accumulate_bucket(samples);
-    if (count == 0) return samples.front();
-    int32_t estimate = static_cast<int32_t>(((a / count) << 24) | ((r / count) << 16) | ((g / count) << 8) | (b / count));
-
-    int close_count = 0;
-    for (const int32_t argb : samples) {
-        if (weighted_distance(argb, estimate) <= static_cast<float>(std::max(10, config.color_distance_threshold))) {
-            close_count += 1;
-        }
-    }
-    if (close_count < static_cast<int>(samples.size() * 0.18f) && !corner_samples.empty()) {
-        long long ca = 0, cr = 0, cg = 0, cb = 0;
-        for (const int32_t argb : corner_samples) {
-            ca += alpha(argb);
-            cr += red(argb);
-            cg += green(argb);
-            cb += blue(argb);
-        }
-        const long long c = static_cast<long long>(corner_samples.size());
-        estimate = static_cast<int32_t>(((ca / c) << 24) | ((cr / c) << 16) | ((cg / c) << 8) | (cb / c));
-    }
-    return estimate;
 }
 
-std::vector<RegionWork> trace_regions(const std::vector<uint8_t>& mask, int width, int height, const NativeDetectionConfig& config, int* connected) {
-    std::vector<uint8_t> visited(mask.size(), 0);
-    std::vector<int> queue;
-    queue.reserve(mask.size());
-    std::vector<RegionWork> regions;
-    int components = 0;
+std::int32_t encode_argb(const Rgba& rgba) {
+    const std::uint32_t bits =
+        (static_cast<std::uint32_t>(rgba.a) << 24U) |
+        (static_cast<std::uint32_t>(rgba.r) << 16U) |
+        (static_cast<std::uint32_t>(rgba.g) << 8U) |
+        static_cast<std::uint32_t>(rgba.b);
+    return static_cast<std::int32_t>(bits);
+}
 
+float weighted_color_distance(const Rgba& left, const Rgba& right) {
+    return std::abs(left.r - right.r) * 0.35f +
+        std::abs(left.g - right.g) * 0.50f +
+        std::abs(left.b - right.b) * 0.15f +
+        std::abs(left.a - right.a) * 0.45f;
+}
+
+Rgba average_rgba(const BucketStats& bucket) {
+    if (bucket.count <= 0) return {};
+    return Rgba{
+        static_cast<int>(std::lround(static_cast<double>(bucket.sumR) / bucket.count)),
+        static_cast<int>(std::lround(static_cast<double>(bucket.sumG) / bucket.count)),
+        static_cast<int>(std::lround(static_cast<double>(bucket.sumB) / bucket.count)),
+        static_cast<int>(std::lround(static_cast<double>(bucket.sumA) / bucket.count)),
+    };
+}
+
+DetectionContext build_detection_context(const NativeImageBuffer& image, const NativeDetectionConfig& config) {
+    DetectionContext context;
+    if (image.width <= 0 || image.height <= 0 || image.pixels == nullptr) {
+        context.mode = kModeFallbackBackground;
+        return context;
+    }
+
+    if (config.useManualBackground == 1U) {
+        context.background = decode_argb(config.manualBackgroundArgb);
+        context.mode = kModeSolidBackground;
+        context.sampleCount = 0;
+    } else {
+        const int edge = std::max(1, std::min({config.edgeSampleWidth, image.width, image.height}));
+        int transparentSamples = 0;
+        std::unordered_map<std::uint32_t, BucketStats> buckets;
+        for (int y = 0; y < image.height; ++y) {
+            for (int x = 0; x < image.width; ++x) {
+                if (!(x < edge || y < edge || x >= image.width - edge || y >= image.height - edge)) {
+                    continue;
+                }
+                const Rgba rgba = decode_argb(image.pixels[y * image.width + x]);
+                ++context.sampleCount;
+                if (rgba.a <= config.alphaThreshold) {
+                    ++transparentSamples;
+                }
+                const std::uint32_t key =
+                    (static_cast<std::uint32_t>((rgba.r / 16) * 16) << 24U) |
+                    (static_cast<std::uint32_t>((rgba.g / 16) * 16) << 16U) |
+                    (static_cast<std::uint32_t>((rgba.b / 16) * 16) << 8U) |
+                    static_cast<std::uint32_t>((rgba.a / 32) * 32);
+                BucketStats& bucket = buckets[key];
+                bucket.count += 1;
+                bucket.sumR += rgba.r;
+                bucket.sumG += rgba.g;
+                bucket.sumB += rgba.b;
+                bucket.sumA += rgba.a;
+            }
+        }
+        const float transparentRatio = context.sampleCount == 0 ? 0.0f :
+            static_cast<float>(transparentSamples) / static_cast<float>(context.sampleCount);
+        if (transparentRatio >= 0.60f) {
+            context.mode = kModeAlphaMask;
+            context.background = Rgba{0, 0, 0, 0};
+        } else {
+            context.mode = kModeSolidBackground;
+            BucketStats bestBucket;
+            for (const auto& entry : buckets) {
+                if (entry.second.count > bestBucket.count) bestBucket = entry.second;
+            }
+            context.background = average_rgba(bestBucket);
+        }
+    }
+
+    const float threshold = std::max(
+        12.0f,
+        static_cast<float>(config.colorDistanceThreshold) - static_cast<float>(config.backgroundTolerance) * 0.25f
+    );
+    context.mask.assign(static_cast<std::size_t>(image.width * image.height), 0U);
+    for (int index = 0; index < image.width * image.height; ++index) {
+        const Rgba rgba = decode_argb(image.pixels[index]);
+        bool foreground = false;
+        if (rgba.a > config.alphaThreshold) {
+            if (context.mode == kModeAlphaMask && rgba.a < 250) {
+                foreground = true;
+            } else if (context.background.a <= config.alphaThreshold && rgba.a >= 250) {
+                foreground = true;
+            } else if (weighted_color_distance(rgba, context.background) > threshold) {
+                foreground = true;
+            }
+        }
+        context.mask[static_cast<std::size_t>(index)] = foreground ? 1U : 0U;
+        if (foreground) ++context.candidatePixels;
+    }
+    return context;
+}
+
+std::vector<std::pair<int, int>> neighbors4(int x, int y) {
+    return {{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}};
+}
+
+std::vector<std::pair<int, int>> neighbors8(int x, int y) {
+    return {
+        {x - 1, y - 1}, {x, y - 1}, {x + 1, y - 1},
+        {x - 1, y},                 {x + 1, y},
+        {x - 1, y + 1}, {x, y + 1}, {x + 1, y + 1},
+    };
+}
+
+void dilate(std::vector<std::uint8_t>& mask, int width, int height) {
+    std::vector<std::uint8_t> output(mask.size(), 0U);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const int start = idx(x, y, width);
-            if (!mask[start] || visited[start]) continue;
-            components += 1;
-            visited[start] = 1;
-            queue.clear();
-            queue.push_back(start);
-            size_t head = 0;
-            int min_x = x, max_x = x, min_y = y, max_y = y, pixels = 0;
-
-            while (head < queue.size()) {
-                const int current = queue[head++];
-                const int cx = current % width;
-                const int cy = current / width;
-                pixels += 1;
-                min_x = std::min(min_x, cx);
-                max_x = std::max(max_x, cx);
-                min_y = std::min(min_y, cy);
-                max_y = std::max(max_y, cy);
-
-                for (int oy = -1; oy <= 1; ++oy) {
-                    for (int ox = -1; ox <= 1; ++ox) {
-                        if (ox == 0 && oy == 0) continue;
-                        const int nx = cx + ox;
-                        const int ny = cy + oy;
-                        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-                        const int next = idx(nx, ny, width);
-                        if (!mask[next] || visited[next]) continue;
-                        visited[next] = 1;
-                        queue.push_back(next);
-                    }
+            const int index = y * width + x;
+            if (mask[static_cast<std::size_t>(index)] == 0U) continue;
+            output[static_cast<std::size_t>(index)] = 1U;
+            for (const auto& [nx, ny] : neighbors8(x, y)) {
+                if (is_inside(nx, ny, width, height)) {
+                    output[static_cast<std::size_t>(ny * width + nx)] = 1U;
                 }
             }
-
-            const int region_width = max_x - min_x + 1;
-            const int region_height = max_y - min_y + 1;
-            if (config.remove_small_regions) {
-                if (region_width < config.min_width || region_height < config.min_height || pixels < config.min_pixel_area) continue;
-            }
-            const int pad = std::max(0, config.bbox_padding);
-            const int left = std::max(0, min_x - pad);
-            const int top = std::max(0, min_y - pad);
-            const int right = std::min(width - 1, max_x + pad);
-            const int bottom = std::min(height - 1, max_y + pad);
-            regions.push_back({left, top, right - left + 1, bottom - top + 1, pixels});
         }
     }
-    if (connected) *connected = components;
-    return regions;
+    mask.swap(output);
 }
 
-bool should_merge(const RegionWork& a, const RegionWork& b, int gap) {
-    const int a_right = a.x + a.width;
-    const int a_bottom = a.y + a.height;
-    const int b_right = b.x + b.width;
-    const int b_bottom = b.y + b.height;
-    const int horizontal = std::max(0, std::max(a.x - b_right, b.x - a_right));
-    const int vertical = std::max(0, std::max(a.y - b_bottom, b.y - a_bottom));
-    return horizontal <= gap && vertical <= gap;
+void erode(std::vector<std::uint8_t>& mask, int width, int height) {
+    std::vector<std::uint8_t> output(mask.size(), 0U);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int index = y * width + x;
+            if (mask[static_cast<std::size_t>(index)] == 0U) continue;
+            bool keep = true;
+            for (const auto& [nx, ny] : neighbors8(x, y)) {
+                if (!is_inside(nx, ny, width, height) || mask[static_cast<std::size_t>(ny * width + nx)] == 0U) {
+                    keep = false;
+                    break;
+                }
+            }
+            output[static_cast<std::size_t>(index)] = keep ? 1U : 0U;
+        }
+    }
+    mask.swap(output);
 }
 
-std::vector<RegionWork> merge_regions(std::vector<RegionWork> regions, int gap) {
+void fill_holes(std::vector<std::uint8_t>& mask, int width, int height) {
+    std::vector<std::uint8_t> visited(mask.size(), 0U);
+    std::queue<int> queue;
+    auto enqueue = [&](int x, int y) {
+        if (!is_inside(x, y, width, height)) return;
+        const int index = y * width + x;
+        if (visited[static_cast<std::size_t>(index)] != 0U || mask[static_cast<std::size_t>(index)] != 0U) return;
+        visited[static_cast<std::size_t>(index)] = 1U;
+        queue.push(index);
+    };
+
+    for (int x = 0; x < width; ++x) {
+        enqueue(x, 0);
+        enqueue(x, height - 1);
+    }
+    for (int y = 0; y < height; ++y) {
+        enqueue(0, y);
+        enqueue(width - 1, y);
+    }
+    while (!queue.empty()) {
+        const int current = queue.front();
+        queue.pop();
+        const int x = current % width;
+        const int y = current / width;
+        for (const auto& [nx, ny] : neighbors4(x, y)) {
+            if (!is_inside(nx, ny, width, height)) continue;
+            const int nextIndex = ny * width + nx;
+            if (visited[static_cast<std::size_t>(nextIndex)] == 0U &&
+                mask[static_cast<std::size_t>(nextIndex)] == 0U) {
+                visited[static_cast<std::size_t>(nextIndex)] = 1U;
+                queue.push(nextIndex);
+            }
+        }
+    }
+    for (std::size_t index = 0; index < mask.size(); ++index) {
+        if (mask[index] == 0U && visited[index] == 0U) {
+            mask[index] = 1U;
+        }
+    }
+}
+
+std::vector<Component> extract_components(const NativeImageBuffer& image, const std::vector<std::uint8_t>& mask, bool eightConnected) {
+    std::vector<Component> components;
+    std::vector<std::uint8_t> visited(mask.size(), 0U);
+    std::vector<RowSpan> scratchRows;
+    for (int start = 0; start < image.width * image.height; ++start) {
+        if (mask[static_cast<std::size_t>(start)] == 0U || visited[static_cast<std::size_t>(start)] != 0U) continue;
+        std::queue<int> queue;
+        queue.push(start);
+        visited[static_cast<std::size_t>(start)] = 1U;
+        Component component;
+        std::unordered_map<int, std::pair<int, int>> rowMap;
+
+        while (!queue.empty()) {
+            const int current = queue.front();
+            queue.pop();
+            const int x = current % image.width;
+            const int y = current / image.width;
+            const Rgba rgba = decode_argb(image.pixels[current]);
+            component.minX = std::min(component.minX, x);
+            component.minY = std::min(component.minY, y);
+            component.maxX = std::max(component.maxX, x);
+            component.maxY = std::max(component.maxY, y);
+            component.pixelCount += 1;
+            component.sumR += rgba.r;
+            component.sumG += rgba.g;
+            component.sumB += rgba.b;
+            component.sumA += rgba.a;
+            auto existing = rowMap.find(y);
+            if (existing == rowMap.end()) {
+                rowMap.emplace(y, std::make_pair(x, x));
+            } else {
+                auto& span = existing->second;
+                if (span.first == 0 && span.second == 0 && y == 0) span = {x, x};
+                span.first = std::min(span.first, x);
+                span.second = std::max(span.second, x);
+            }
+
+            const auto neighbors = eightConnected ? neighbors8(x, y) : neighbors4(x, y);
+            for (const auto& [nx, ny] : neighbors) {
+                if (!is_inside(nx, ny, image.width, image.height)) continue;
+                const int nextIndex = ny * image.width + nx;
+                if (mask[static_cast<std::size_t>(nextIndex)] == 0U || visited[static_cast<std::size_t>(nextIndex)] != 0U) {
+                    continue;
+                }
+                visited[static_cast<std::size_t>(nextIndex)] = 1U;
+                queue.push(nextIndex);
+            }
+        }
+
+        component.rows.reserve(rowMap.size());
+        for (const auto& entry : rowMap) {
+            component.rows.push_back(RowSpan{entry.first, entry.second.first, entry.second.second});
+        }
+        std::sort(component.rows.begin(), component.rows.end(), [](const RowSpan& left, const RowSpan& right) {
+            return left.y < right.y;
+        });
+        components.push_back(std::move(component));
+    }
+    return components;
+}
+
+void merge_masks_or(std::vector<std::uint8_t>& target, const std::vector<std::uint8_t>& added) {
+    const std::size_t count = std::min(target.size(), added.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        target[index] = (target[index] != 0U || added[index] != 0U) ? 1U : 0U;
+    }
+}
+
+bool should_merge_bbox(const RegionModel& left, const RegionModel& right, int gap) {
+    const int leftRight = left.x + left.width;
+    const int leftBottom = left.y + left.height;
+    const int rightRight = right.x + right.width;
+    const int rightBottom = right.y + right.height;
+    const int horizontalGap = std::max(0, std::max(left.x, right.x) - std::min(leftRight, rightRight));
+    const int verticalGap = std::max(0, std::max(left.y, right.y) - std::min(leftBottom, rightBottom));
+    return horizontalGap <= gap && verticalGap <= gap;
+}
+
+std::vector<NativePoint> dedupe_adjacent(std::vector<NativePoint> points) {
+    std::vector<NativePoint> output;
+    output.reserve(points.size());
+    for (const NativePoint& point : points) {
+        if (!output.empty() && output.back().x == point.x && output.back().y == point.y) continue;
+        output.push_back(point);
+    }
+    if (output.size() > 1U && output.front().x == output.back().x && output.front().y == output.back().y) {
+        output.pop_back();
+    }
+    return output;
+}
+
+bool is_collinear(const NativePoint& previous, const NativePoint& current, const NativePoint& next, int tolerance) {
+    const int leftX = current.x - previous.x;
+    const int leftY = current.y - previous.y;
+    const int rightX = next.x - current.x;
+    const int rightY = next.y - current.y;
+    return std::abs(leftX * rightY - leftY * rightX) <= tolerance;
+}
+
+std::vector<NativePoint> simplify_polygon(std::vector<NativePoint> points, int tolerance) {
+    if (points.size() <= 4U || tolerance <= 0) return points;
+    std::vector<NativePoint> simplified;
+    simplified.reserve(points.size());
+    simplified.push_back(points.front());
+    for (std::size_t index = 1; index + 1 < points.size(); ++index) {
+        if (is_collinear(simplified.back(), points[index], points[index + 1], tolerance)) continue;
+        simplified.push_back(points[index]);
+    }
+    simplified.push_back(points.back());
+    return dedupe_adjacent(std::move(simplified));
+}
+
+std::vector<NativePoint> rect_points(int x, int y, int width, int height) {
+    return {
+        NativePoint{x, y},
+        NativePoint{x + width, y},
+        NativePoint{x + width, y + height},
+        NativePoint{x, y + height},
+    };
+}
+
+std::vector<NativePoint> polygon_from_rows(const std::vector<RowSpan>& rows, int sampleTarget, int tolerance) {
+    if (rows.empty()) return {};
+    const int step = std::max(1, static_cast<int>(rows.size()) / std::max(12, sampleTarget));
+    std::vector<RowSpan> sampled;
+    for (std::size_t index = 0; index < rows.size(); index += static_cast<std::size_t>(step)) {
+        sampled.push_back(rows[index]);
+    }
+    if (sampled.back().y != rows.back().y || sampled.back().left != rows.back().left || sampled.back().right != rows.back().right) {
+        sampled.push_back(rows.back());
+    }
+    std::vector<NativePoint> points;
+    points.reserve(sampled.size() * 2U);
+    for (const RowSpan& row : sampled) {
+        points.push_back(NativePoint{row.left, row.y});
+    }
+    for (auto it = sampled.rbegin(); it != sampled.rend(); ++it) {
+        points.push_back(NativePoint{it->right + 1, it->y + 1});
+    }
+    points = dedupe_adjacent(std::move(points));
+    if (points.size() < 4U) {
+        const RowSpan& first = rows.front();
+        const RowSpan& last = rows.back();
+        const int minLeft = std::min(first.left, last.left);
+        const int maxRight = std::max(first.right, last.right);
+        return rect_points(minLeft, first.y, maxRight - minLeft + 1, last.y - first.y + 1);
+    }
+    return simplify_polygon(std::move(points), tolerance);
+}
+
+void recompute_bbox_from_points(RegionModel& region) {
+    if (region.points.empty()) return;
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    for (const NativePoint& point : region.points) {
+        minX = std::min(minX, point.x);
+        minY = std::min(minY, point.y);
+        maxX = std::max(maxX, point.x);
+        maxY = std::max(maxY, point.y);
+    }
+    region.x = minX;
+    region.y = minY;
+    region.width = std::max(1, maxX - minX);
+    region.height = std::max(1, maxY - minY);
+}
+
+RegionModel component_to_region(const Component& component, const Rgba& background, const NativeDetectionConfig& config) {
+    RegionModel region;
+    const int width = component.maxX - component.minX + 1;
+    const int height = component.maxY - component.minY + 1;
+    const int pixelCount = component.pixelCount;
+    if (width < config.minWidth || height < config.minHeight || pixelCount < config.minPixelArea) {
+        return region;
+    }
+
+    const float density = static_cast<float>(pixelCount) / static_cast<float>(std::max(1, width * height));
+    const Rgba mean{
+        static_cast<int>(std::lround(static_cast<double>(component.sumR) / pixelCount)),
+        static_cast<int>(std::lround(static_cast<double>(component.sumG) / pixelCount)),
+        static_cast<int>(std::lround(static_cast<double>(component.sumB) / pixelCount)),
+        static_cast<int>(std::lround(static_cast<double>(component.sumA) / pixelCount)),
+    };
+    const float contrast = weighted_color_distance(mean, background) / std::max(1.0f, static_cast<float>(config.colorDistanceThreshold) * 2.2f);
+    const float sizeRatio = std::min(1.0f, static_cast<float>(pixelCount) / static_cast<float>(std::max(config.minPixelArea, 1) * 8));
+    const float alphaBoost = static_cast<float>(mean.a) / 255.0f;
+    const float score = std::clamp(density * 0.45f + contrast * 0.35f + sizeRatio * 0.10f + alphaBoost * 0.10f, 0.0f, 0.99f);
+    if (config.removeSmallRegions == 1U && score < 0.12f) {
+        return region;
+    }
+
+    region.points = polygon_from_rows(component.rows, 48, 1);
+    if (region.points.empty()) {
+        region.points = rect_points(component.minX, component.minY, width, height);
+    }
+    region.score = score;
+    recompute_bbox_from_points(region);
+    return region;
+}
+
+RegionModel merge_region_models(const RegionModel& left, const RegionModel& right) {
+    RegionModel merged;
+    merged.score = std::max(left.score, right.score);
+    merged.points = left.points;
+    merged.points.insert(merged.points.end(), right.points.begin(), right.points.end());
+    if (merged.points.empty()) {
+        merged.points = rect_points(
+            std::min(left.x, right.x),
+            std::min(left.y, right.y),
+            std::max(left.x + left.width, right.x + right.width) - std::min(left.x, right.x),
+            std::max(left.y + left.height, right.y + right.height) - std::min(left.y, right.y)
+        );
+    } else {
+        recompute_bbox_from_points(merged);
+    }
+    return merged;
+}
+
+std::vector<RegionModel> merge_nearby(std::vector<RegionModel> regions, int gap) {
+    if (regions.size() < 2U) return regions;
     bool changed = true;
     while (changed) {
         changed = false;
-        for (size_t i = 0; i < regions.size() && !changed; ++i) {
-            for (size_t j = i + 1; j < regions.size(); ++j) {
-                if (!should_merge(regions[i], regions[j], gap)) continue;
-                const int left = std::min(regions[i].x, regions[j].x);
-                const int top = std::min(regions[i].y, regions[j].y);
-                const int right = std::max(regions[i].x + regions[i].width, regions[j].x + regions[j].width);
-                const int bottom = std::max(regions[i].y + regions[i].height, regions[j].y + regions[j].height);
-                regions[i] = {left, top, right - left, bottom - top, regions[i].pixels + regions[j].pixels};
-                regions.erase(regions.begin() + static_cast<long long>(j));
+        for (std::size_t left = 0; left < regions.size() && !changed; ++left) {
+            for (std::size_t right = left + 1; right < regions.size(); ++right) {
+                if (!should_merge_bbox(regions[left], regions[right], gap)) continue;
+                regions[left] = merge_region_models(regions[left], regions[right]);
+                regions.erase(regions.begin() + static_cast<std::ptrdiff_t>(right));
                 changed = true;
                 break;
             }
@@ -193,267 +512,418 @@ std::vector<RegionWork> merge_regions(std::vector<RegionWork> regions, int gap) 
     return regions;
 }
 
-void write_regions(NativeDetectionResult* result, const std::vector<RegionWork>& regions, int mode, int32_t background, int candidate_pixels, int connected, int background_samples, long long total_time_ms) {
-    result->mode = mode;
-    result->region_count = static_cast<int32_t>(regions.size());
-    result->stats.estimated_background_argb = background;
-    result->stats.candidate_pixels = candidate_pixels;
-    result->stats.connected_components = connected;
-    result->stats.region_count = static_cast<int32_t>(regions.size());
-    result->stats.background_sample_count = background_samples;
-    result->stats.total_time_ms = total_time_ms;
-    result->regions = nullptr;
-    if (regions.empty()) return;
-    auto* native_regions = static_cast<NativeRegion*>(std::calloc(regions.size(), sizeof(NativeRegion)));
-    for (size_t i = 0; i < regions.size(); ++i) {
-        native_regions[i] = {regions[i].x, regions[i].y, regions[i].width, regions[i].height, 1, 0};
+void assign_region_points(NativeRegion& target, const std::vector<NativePoint>& points) {
+    target.pointCount = static_cast<int>(points.size());
+    if (points.empty()) {
+        target.points = nullptr;
+        return;
     }
-    result->regions = native_regions;
-}
-
-long long elapsed_ms(std::chrono::steady_clock::time_point start) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-}
-
-int32_t builtin_detect_icons(const NativeImageBuffer* image, const NativeDetectionConfig* config, NativeDetectionResult* result) {
-    try {
-        if (!image || !config || !result || !image->pixels || image->width <= 0 || image->height <= 0) return ERR_INVALID_ARGUMENT;
-        const auto start = std::chrono::steady_clock::now();
-        const int width = image->width;
-        const int height = image->height;
-        const int total = width * height;
-        std::vector<uint8_t> alpha_mask(static_cast<size_t>(total), 0);
-        int alpha_candidates = 0;
-        for (int i = 0; i < total; ++i) {
-            if (alpha(image->pixels[i]) > config->alpha_threshold) {
-                alpha_mask[i] = 1;
-                alpha_candidates += 1;
-            }
-        }
-
-        int connected = 0;
-        auto regions = trace_regions(alpha_mask, width, height, *config, &connected);
-        if (alpha_candidates > 0 && alpha_candidates < static_cast<int>(total * 0.92f) && !regions.empty()) {
-            if (config->merge_nearby_regions) regions = merge_regions(std::move(regions), std::max(0, config->gap_threshold));
-            write_regions(result, regions, MODE_ALPHA_MASK, 0, alpha_candidates, connected, 0, elapsed_ms(start));
-            return 0;
-        }
-
-        int background_samples = 0;
-        const int32_t background = config->use_manual_background
-            ? config->manual_background_argb
-            : estimate_edge_background(*image, *config, &background_samples);
-        std::vector<uint8_t> color_mask(static_cast<size_t>(total), 0);
-        int color_candidates = 0;
-        for (int i = 0; i < total; ++i) {
-            if (!matches_background(image->pixels[i], background, *config)) {
-                color_mask[i] = 1;
-                color_candidates += 1;
-            }
-        }
-        connected = 0;
-        regions = trace_regions(color_mask, width, height, *config, &connected);
-        if (config->merge_nearby_regions) regions = merge_regions(std::move(regions), std::max(0, config->gap_threshold));
-        write_regions(result, regions, MODE_SOLID_BACKGROUND, background, color_candidates, connected, background_samples, elapsed_ms(start));
-        return 0;
-    } catch (...) {
-        return ERR_PANIC;
+    auto* allocated = new NativePoint[points.size()];
+    for (std::size_t index = 0; index < points.size(); ++index) {
+        allocated[index] = points[index];
     }
+    target.points = allocated;
 }
 
-int32_t builtin_split_grid(const NativeImageBuffer* image, const NativeGridConfig* config, NativeDetectionResult* result) {
-    try {
-        if (!image || !config || !result || !image->pixels || image->width <= 0 || image->height <= 0) return ERR_INVALID_ARGUMENT;
-        const auto start = std::chrono::steady_clock::now();
-        std::vector<RegionWork> regions;
-        const int columns = std::max(1, config->columns);
-        const int rows = std::max(1, config->rows);
-        const int cell_width = std::max(1, config->cell_width);
-        const int cell_height = std::max(1, config->cell_height);
-        const int gap_x = std::max(0, config->gap_x);
-        const int gap_y = std::max(0, config->gap_y);
+void populate_region(NativeRegion& target, const RegionModel& source, bool selected = false) {
+    target.x = source.x;
+    target.y = source.y;
+    target.width = source.width;
+    target.height = source.height;
+    target.visible = 1U;
+    target.selected = selected ? 1U : 0U;
+    target.score = source.score;
+    assign_region_points(target, source.points);
+}
 
-        for (int row = 0; row < rows; ++row) {
-            for (int column = 0; column < columns; ++column) {
-                const int cell_x = config->offset_x + column * (cell_width + gap_x);
-                const int cell_y = config->offset_y + row * (cell_height + gap_y);
-                const int left = std::max(0, cell_x - config->search_padding);
-                const int top = std::max(0, cell_y - config->search_padding);
-                const int right = std::min(image->width, cell_x + cell_width + config->search_padding);
-                const int bottom = std::min(image->height, cell_y + cell_height + config->search_padding);
-                if (left >= right || top >= bottom) continue;
+std::vector<NativePoint> outline_from_mask(const std::vector<std::uint8_t>& mask, int width, int height) {
+    std::vector<RowSpan> rows;
+    rows.reserve(height);
+    for (int y = 0; y < height; ++y) {
+        int left = -1;
+        int right = -1;
+        for (int x = 0; x < width; ++x) {
+            if (mask[static_cast<std::size_t>(y * width + x)] == 0U) continue;
+            if (left < 0) left = x;
+            right = x;
+        }
+        if (left >= 0) rows.push_back(RowSpan{y, left, right});
+    }
+    return polygon_from_rows(rows, 96, 1);
+}
 
-                const int32_t background = image->pixels[idx(left, top, image->width)];
-                int min_x = right, min_y = bottom, max_x = left - 1, max_y = top - 1, pixels = 0;
-                for (int y = top; y < bottom; ++y) {
-                    for (int x = left; x < right; ++x) {
-                        const int32_t argb = image->pixels[idx(x, y, image->width)];
-                        if (alpha(argb) <= config->alpha_threshold) continue;
-                        const int delta = std::max({std::abs(red(argb) - red(background)), std::abs(green(argb) - green(background)), std::abs(blue(argb) - blue(background))});
-                        if (delta <= std::max(1, config->background_tolerance)) continue;
-                        min_x = std::min(min_x, x);
-                        min_y = std::min(min_y, y);
-                        max_x = std::max(max_x, x);
-                        max_y = std::max(max_y, y);
-                        pixels += 1;
-                    }
+RegionModel region_from_mask(const std::vector<std::uint8_t>& mask, int width, int height, int bboxPadding = 0) {
+    RegionModel region;
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    int pixelCount = 0;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (mask[static_cast<std::size_t>(y * width + x)] == 0U) continue;
+            ++pixelCount;
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        }
+    }
+    if (pixelCount == 0) return region;
+    region.points = outline_from_mask(mask, width, height);
+    if (region.points.empty()) {
+        region.points = rect_points(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+    if (bboxPadding > 0) {
+        for (NativePoint& point : region.points) {
+            point.x = std::clamp(point.x, 0, width);
+            point.y = std::clamp(point.y, 0, height);
+        }
+    }
+    region.score = 1.0f;
+    recompute_bbox_from_points(region);
+    if (bboxPadding > 0) {
+        region.x = std::max(0, region.x - bboxPadding);
+        region.y = std::max(0, region.y - bboxPadding);
+        region.width = std::min(width, region.x + region.width + bboxPadding * 2) - region.x;
+        region.height = std::min(height, region.y + region.height + bboxPadding * 2) - region.y;
+    }
+    return region;
+}
+
+int flood_magic_region(const NativeImageBuffer& image, int seedX, int seedY, const NativeDetectionConfig& config, std::vector<std::uint8_t>& mask) {
+    if (!is_inside(seedX, seedY, image.width, image.height) || image.pixels == nullptr) return 0;
+    const NativeDetectionConfig backgroundConfig = config;
+    const DetectionContext context = build_detection_context(image, backgroundConfig);
+    const int seedIndex = seedY * image.width + seedX;
+    const Rgba seedColor = decode_argb(image.pixels[seedIndex]);
+    const float backgroundDistance = weighted_color_distance(seedColor, context.background);
+    const float backgroundThreshold = std::max(
+        8.0f,
+        static_cast<float>(config.colorDistanceThreshold) - static_cast<float>(config.backgroundTolerance) * 0.25f
+    );
+    if (seedColor.a <= config.alphaThreshold) return 0;
+    if (context.mode != kModeAlphaMask && backgroundDistance <= backgroundThreshold) return 0;
+
+    mask.assign(static_cast<std::size_t>(image.width * image.height), 0U);
+    std::vector<std::uint8_t> visited(mask.size(), 0U);
+    std::queue<int> queue;
+    queue.push(seedIndex);
+    visited[static_cast<std::size_t>(seedIndex)] = 1U;
+    int pixelCount = 0;
+
+    while (!queue.empty()) {
+        const int current = queue.front();
+        queue.pop();
+        const int x = current % image.width;
+        const int y = current / image.width;
+        const Rgba rgba = decode_argb(image.pixels[current]);
+        const float seedDistance = weighted_color_distance(rgba, seedColor);
+        if (rgba.a <= config.alphaThreshold || seedDistance > static_cast<float>(config.colorDistanceThreshold)) {
+            continue;
+        }
+        mask[static_cast<std::size_t>(current)] = 1U;
+        ++pixelCount;
+        for (const auto& [nx, ny] : neighbors8(x, y)) {
+            if (!is_inside(nx, ny, image.width, image.height)) continue;
+            const int nextIndex = ny * image.width + nx;
+            if (visited[static_cast<std::size_t>(nextIndex)] != 0U) continue;
+            visited[static_cast<std::size_t>(nextIndex)] = 1U;
+            queue.push(nextIndex);
+        }
+    }
+    return pixelCount;
+}
+
+std::vector<RegionModel> build_grid_regions(const NativeImageBuffer& image, const NativeGridConfig& config) {
+    std::vector<RegionModel> regions;
+    if (image.width <= 0 || image.height <= 0 || image.pixels == nullptr) return regions;
+
+    const NativeDetectionConfig detectionConfig{
+        1,
+        1,
+        0,
+        config.alphaThreshold,
+        config.backgroundTolerance,
+        2,
+        1,
+        std::max(24, config.backgroundTolerance * 3),
+        0,
+        0,
+        1U,
+        0,
+        0U,
+        0U,
+        0U,
+        0
+    };
+    const DetectionContext context = build_detection_context(image, detectionConfig);
+
+    for (int row = 0; row < std::max(0, config.rows); ++row) {
+        for (int col = 0; col < std::max(0, config.columns); ++col) {
+            int x = config.offsetX + col * (config.cellWidth + config.gapX);
+            int y = config.offsetY + row * (config.cellHeight + config.gapY);
+            int width = config.cellWidth;
+            int height = config.cellHeight;
+            if (width <= 0 || height <= 0) continue;
+            if (x >= image.width || y >= image.height) continue;
+            width = std::min(width, image.width - x);
+            height = std::min(height, image.height - y);
+            if (width <= 0 || height <= 0) continue;
+
+            int searchLeft = x;
+            int searchTop = y;
+            int searchRight = x + width;
+            int searchBottom = y + height;
+            if (config.snapToContent == 1U) {
+                searchLeft = std::max(0, x - config.searchPadding);
+                searchTop = std::max(0, y - config.searchPadding);
+                searchRight = std::min(image.width, x + width + config.searchPadding);
+                searchBottom = std::min(image.height, y + height + config.searchPadding);
+            }
+
+            int minX = std::numeric_limits<int>::max();
+            int minY = std::numeric_limits<int>::max();
+            int maxX = std::numeric_limits<int>::min();
+            int maxY = std::numeric_limits<int>::min();
+            bool found = false;
+            for (int py = searchTop; py < searchBottom; ++py) {
+                for (int px = searchLeft; px < searchRight; ++px) {
+                    if (context.mask[static_cast<std::size_t>(py * image.width + px)] == 0U) continue;
+                    found = true;
+                    minX = std::min(minX, px);
+                    minY = std::min(minY, py);
+                    maxX = std::max(maxX, px);
+                    maxY = std::max(maxY, py);
                 }
-                if (max_x < min_x || max_y < min_y) {
-                    if (!config->ignore_empty_cells) {
-                        regions.push_back({std::max(0, cell_x), std::max(0, cell_y), std::min(cell_width, image->width - cell_x), std::min(cell_height, image->height - cell_y), 0});
-                    }
-                    continue;
-                }
-                regions.push_back({min_x, min_y, max_x - min_x + 1, max_y - min_y + 1, pixels});
             }
+
+            if (!found) {
+                if (config.ignoreEmptyCells == 1U) continue;
+                RegionModel region;
+                region.x = x;
+                region.y = y;
+                region.width = width;
+                region.height = height;
+                region.points = rect_points(x, y, width, height);
+                region.score = 1.0f;
+                regions.push_back(std::move(region));
+                continue;
+            }
+
+            RegionModel region;
+            if (config.trimCellToContent == 1U) {
+                region.x = minX;
+                region.y = minY;
+                region.width = std::max(1, maxX - minX + 1);
+                region.height = std::max(1, maxY - minY + 1);
+            } else {
+                region.x = x;
+                region.y = y;
+                region.width = width;
+                region.height = height;
+            }
+            region.points = rect_points(region.x, region.y, region.width, region.height);
+            region.score = 1.0f;
+            regions.push_back(std::move(region));
         }
-        write_regions(result, regions, MODE_FALLBACK_BACKGROUND, 0, 0, static_cast<int>(regions.size()), 0, elapsed_ms(start));
-        return 0;
-    } catch (...) {
-        return ERR_PANIC;
     }
+    return regions;
 }
 
-int32_t builtin_detect_magic_region(const NativeImageBuffer* image, int32_t seed_x, int32_t seed_y, const NativeDetectionConfig* config, NativeMagicResult* result) {
-    try {
-        if (!image || !config || !result || !image->pixels || image->width <= 0 || image->height <= 0) return ERR_INVALID_ARGUMENT;
-        std::memset(result, 0, sizeof(NativeMagicResult));
-        if (seed_x < 0 || seed_y < 0 || seed_x >= image->width || seed_y >= image->height) return 0;
-        const int width = image->width;
-        const int height = image->height;
-        const int total = width * height;
-        const int32_t seed = image->pixels[idx(seed_x, seed_y, width)];
-        int background_samples = 0;
-        const int32_t background = config->use_manual_background
-            ? config->manual_background_argb
-            : estimate_edge_background(*image, *config, &background_samples);
-        if (matches_background(seed, background, *config)) return 0;
-
-        std::vector<uint8_t> visited(static_cast<size_t>(total), 0);
-        std::vector<uint8_t> matched(static_cast<size_t>(total), 0);
-        std::queue<int> queue;
-        const int start = idx(seed_x, seed_y, width);
-        visited[start] = 1;
-        queue.push(start);
-        int min_x = seed_x, max_x = seed_x, min_y = seed_y, max_y = seed_y, pixels = 0;
-
-        while (!queue.empty()) {
-            const int current = queue.front();
-            queue.pop();
-            const int x = current % width;
-            const int y = current / width;
-            const int32_t argb = image->pixels[current];
-            if (std::abs(alpha(argb) - alpha(seed)) > std::max(18, config->alpha_threshold * 3)) continue;
-            if (magic_distance(argb, seed) > config->color_distance_threshold * 2.35f) continue;
-            matched[current] = 1;
-            pixels += 1;
-            min_x = std::min(min_x, x);
-            min_y = std::min(min_y, y);
-            max_x = std::max(max_x, x);
-            max_y = std::max(max_y, y);
-
-            for (int oy = -1; oy <= 1; ++oy) {
-                for (int ox = -1; ox <= 1; ++ox) {
-                    if (ox == 0 && oy == 0) continue;
-                    const int nx = x + ox;
-                    const int ny = y + oy;
-                    if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-                    const int next = idx(nx, ny, width);
-                    if (visited[next]) continue;
-                    visited[next] = 1;
-                    queue.push(next);
-                }
-            }
-        }
-        if (pixels < std::max(1, config->min_pixel_area)) return 0;
-        const int pad = std::max(0, config->bbox_padding);
-        const int left = std::max(0, min_x - pad);
-        const int top = std::max(0, min_y - pad);
-        const int right = std::min(width - 1, max_x + pad);
-        const int bottom = std::min(height - 1, max_y + pad);
-        result->region = {left, top, right - left + 1, bottom - top + 1, 1, 1};
-        result->mask_length = total;
-        result->mask = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(total)));
-        if (!result->mask) return ERR_INVALID_ARGUMENT;
-        std::memcpy(result->mask, matched.data(), static_cast<size_t>(total));
-        result->image_width = width;
-        result->image_height = height;
-        result->seed_x = seed_x;
-        result->seed_y = seed_y;
-        result->pixel_count = pixels;
-        result->found = 1;
-        return 0;
-    } catch (...) {
-        return ERR_PANIC;
-    }
+void reset_detection_result(NativeDetectionResult& result) {
+    result.mode = kModeFallbackBackground;
+    result.regionCount = 0;
+    result.regions = nullptr;
+    result.stats = NativeDetectionStats{};
 }
 
-int32_t merge_magic_masks_impl(
-    const uint8_t* current_mask,
-    int32_t current_length,
-    const uint8_t* added_mask,
-    int32_t added_length,
-    int32_t width,
-    int32_t height,
-    int32_t bbox_padding,
+void reset_magic_result(NativeMagicResult& result) {
+    result.region = NativeRegion{};
+    result.mask = nullptr;
+    result.maskLength = 0;
+    result.imageWidth = 0;
+    result.imageHeight = 0;
+    result.seedX = 0;
+    result.seedY = 0;
+    result.pixelCount = 0;
+    result.found = 0U;
+}
+
+}  // namespace
+
+const char* detector_backend_name_builtin() {
+    return "builtin-offline-polygon-v1";
+}
+
+int detect_icons_builtin(const NativeImageBuffer* image, const NativeDetectionConfig* config, NativeDetectionResult* result) {
+    if (image == nullptr || config == nullptr || result == nullptr) return 1;
+    reset_detection_result(*result);
+    const auto startedAt = std::chrono::steady_clock::now();
+    if (image->width <= 0 || image->height <= 0 || image->pixels == nullptr) {
+        return 1;
+    }
+
+    DetectionContext context = build_detection_context(*image, *config);
+    if (config->enableHoleFill == 1U) fill_holes(context.mask, image->width, image->height);
+    for (int index = 0; index < config->erodeIterations; ++index) erode(context.mask, image->width, image->height);
+    for (int index = 0; index < config->dilateIterations; ++index) dilate(context.mask, image->width, image->height);
+
+    const std::vector<Component> components = extract_components(*image, context.mask, false);
+    std::vector<RegionModel> regions;
+    regions.reserve(components.size());
+    for (const Component& component : components) {
+        RegionModel region = component_to_region(component, context.background, *config);
+        if (region.width > 0 && region.height > 0) {
+            regions.push_back(std::move(region));
+        }
+    }
+    if (config->mergeNearbyRegions == 1U) {
+        regions = merge_nearby(std::move(regions), std::max(0, config->gapThreshold));
+    }
+    std::sort(regions.begin(), regions.end(), [](const RegionModel& left, const RegionModel& right) {
+        return left.y == right.y ? left.x < right.x : left.y < right.y;
+    });
+
+    if (!regions.empty()) {
+        auto* allocated = new NativeRegion[regions.size()];
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            populate_region(allocated[index], regions[index]);
+        }
+        result->regions = allocated;
+        result->regionCount = static_cast<int>(regions.size());
+    }
+    result->mode = context.mode;
+    result->stats.estimatedBackgroundArgb = encode_argb(context.background);
+    result->stats.candidatePixels = context.candidatePixels;
+    result->stats.connectedComponents = static_cast<int>(components.size());
+    result->stats.regionCount = result->regionCount;
+    result->stats.backgroundSampleCount = context.sampleCount;
+    result->stats.totalTimeMs = static_cast<long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - startedAt).count()
+    );
+    return 0;
+}
+
+int split_grid_builtin(const NativeImageBuffer* image, const NativeGridConfig* config, NativeDetectionResult* result) {
+    if (image == nullptr || config == nullptr || result == nullptr) return 1;
+    reset_detection_result(*result);
+    if (image->width <= 0 || image->height <= 0 || image->pixels == nullptr) return 1;
+    std::vector<RegionModel> regions = build_grid_regions(*image, *config);
+    if (!regions.empty()) {
+        auto* allocated = new NativeRegion[regions.size()];
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            populate_region(allocated[index], regions[index]);
+        }
+        result->regions = allocated;
+        result->regionCount = static_cast<int>(regions.size());
+    }
+    result->mode = kModeFallbackBackground;
+    result->stats.regionCount = result->regionCount;
+    result->stats.connectedComponents = result->regionCount;
+    return 0;
+}
+
+int detect_magic_region_builtin(
+    const NativeImageBuffer* image,
+    int seedX,
+    int seedY,
+    const NativeDetectionConfig* config,
     NativeMagicResult* result
 ) {
-    try {
-        if (!current_mask || !added_mask || !result || width <= 0 || height <= 0) return ERR_INVALID_ARGUMENT;
-        const int total = width * height;
-        if (current_length != total || added_length != total) return ERR_INVALID_ARGUMENT;
-        std::memset(result, 0, sizeof(NativeMagicResult));
+    if (image == nullptr || config == nullptr || result == nullptr) return 1;
+    reset_magic_result(*result);
+    if (image->width <= 0 || image->height <= 0 || image->pixels == nullptr) return 1;
+    std::vector<std::uint8_t> mask;
+    const int pixelCount = flood_magic_region(*image, seedX, seedY, *config, mask);
+    if (pixelCount <= 0 || pixelCount < config->minPixelArea) return 0;
 
-        std::vector<uint8_t> merged(static_cast<size_t>(total), 0);
-        bool changed = false;
-        int pixels = 0;
-        int min_x = width;
-        int min_y = height;
-        int max_x = -1;
-        int max_y = -1;
+    RegionModel region = region_from_mask(mask, image->width, image->height, config->bboxPadding);
+    if (region.width <= 0 || region.height <= 0) return 0;
 
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const int index = idx(x, y, width);
-                const uint8_t selected = (current_mask[index] != 0 || added_mask[index] != 0) ? 1 : 0;
-                merged[index] = selected;
-                if (!selected) continue;
-                pixels += 1;
-                min_x = std::min(min_x, x);
-                min_y = std::min(min_y, y);
-                max_x = std::max(max_x, x);
-                max_y = std::max(max_y, y);
-                if (added_mask[index] != 0 && current_mask[index] == 0) changed = true;
-            }
-        }
-
-        if (!changed || pixels <= 0 || max_x < min_x || max_y < min_y) return 0;
-
-        const int pad = std::max(0, bbox_padding);
-        const int left = std::max(0, min_x - pad);
-        const int top = std::max(0, min_y - pad);
-        const int right = std::min(width - 1, max_x + pad);
-        const int bottom = std::min(height - 1, max_y + pad);
-        result->region = {left, top, right - left + 1, bottom - top + 1, 1, 1};
-        result->mask_length = total;
-        result->mask = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(total)));
-        if (!result->mask) return ERR_INVALID_ARGUMENT;
-        std::memcpy(result->mask, merged.data(), static_cast<size_t>(total));
-        result->image_width = width;
-        result->image_height = height;
-        result->seed_x = 0;
-        result->seed_y = 0;
-        result->pixel_count = pixels;
-        result->found = 1;
-        return 0;
-    } catch (...) {
-        return ERR_PANIC;
+    result->maskLength = static_cast<int>(mask.size());
+    result->mask = new std::uint8_t[mask.size()];
+    for (std::size_t index = 0; index < mask.size(); ++index) {
+        result->mask[index] = mask[index];
     }
+    result->imageWidth = image->width;
+    result->imageHeight = image->height;
+    result->seedX = seedX;
+    result->seedY = seedY;
+    result->pixelCount = pixelCount;
+    result->found = 1U;
+    populate_region(result->region, region, true);
+    return 0;
 }
 
-int32_t magic_mask_contains_impl(const uint8_t* mask, int32_t mask_length, int32_t width, int32_t height, int32_t x, int32_t y) {
-    if (!mask || width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height) return 0;
-    const int index = idx(x, y, width);
-    if (index < 0 || index >= mask_length) return 0;
-    return mask[index] != 0 ? 1 : 0;
+int merge_magic_masks_builtin(
+    const std::uint8_t* currentMask,
+    int currentLength,
+    const std::uint8_t* addedMask,
+    int addedLength,
+    int width,
+    int height,
+    int bboxPadding,
+    NativeMagicResult* result
+) {
+    if (result == nullptr) return 1;
+    reset_magic_result(*result);
+    if (currentMask == nullptr || addedMask == nullptr || width <= 0 || height <= 0) return 1;
+    if (currentLength != addedLength || currentLength != width * height) return 1;
+
+    std::vector<std::uint8_t> merged(static_cast<std::size_t>(currentLength), 0U);
+    for (int index = 0; index < currentLength; ++index) {
+        merged[static_cast<std::size_t>(index)] = (currentMask[index] != 0U || addedMask[index] != 0U) ? 1U : 0U;
+    }
+    RegionModel region = region_from_mask(merged, width, height, bboxPadding);
+    if (region.width <= 0 || region.height <= 0) return 0;
+
+    result->maskLength = currentLength;
+    result->mask = new std::uint8_t[merged.size()];
+    for (std::size_t index = 0; index < merged.size(); ++index) {
+        result->mask[index] = merged[index];
+    }
+    result->imageWidth = width;
+    result->imageHeight = height;
+    result->pixelCount = 0;
+    for (std::uint8_t value : merged) {
+        if (value != 0U) ++result->pixelCount;
+    }
+    result->found = 1U;
+    populate_region(result->region, region, true);
+    return 0;
 }
+
+int magic_mask_contains_builtin(const std::uint8_t* mask, int maskLength, int width, int height, int x, int y) {
+    if (mask == nullptr || maskLength <= 0 || !is_inside(x, y, width, height)) return 0;
+    const int index = y * width + x;
+    if (index < 0 || index >= maskLength) return 0;
+    return mask[index] != 0U ? 1 : 0;
+}
+
+void free_detection_result_builtin(NativeDetectionResult* result) {
+    if (result == nullptr) return;
+    if (result->regions != nullptr) {
+        for (int index = 0; index < result->regionCount; ++index) {
+            delete[] result->regions[index].points;
+            result->regions[index].points = nullptr;
+            result->regions[index].pointCount = 0;
+        }
+        delete[] result->regions;
+        result->regions = nullptr;
+    }
+    result->regionCount = 0;
+}
+
+void free_magic_result_builtin(NativeMagicResult* result) {
+    if (result == nullptr) return;
+    delete[] result->region.points;
+    result->region.points = nullptr;
+    result->region.pointCount = 0;
+    delete[] result->mask;
+    result->mask = nullptr;
+    result->maskLength = 0;
+    result->found = 0U;
+}
+
+}  // namespace workflowtool

@@ -275,8 +275,8 @@ private fun RegionDeleteButton(onClick: () -> Unit) {
 
 @Composable
 private fun RegionThumbnail(region: CropRegion, controller: AppController, modifier: Modifier = Modifier) {
-    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height, region.points) {
-        controller.image?.let { previewCropper.cropPreview(it, region).toComposeImageBitmap() }
+    val bitmap = remember(controller.image, controller.regions, region.x, region.y, region.width, region.height, region.points) {
+        controller.image?.let { previewCropper.cropPreview(it, region, controller.regions).toComposeImageBitmap() }
     }
 
     Box(
@@ -299,4 +299,3 @@ private fun RegionThumbnail(region: CropRegion, controller: AppController, modif
         }
     }
 }
-

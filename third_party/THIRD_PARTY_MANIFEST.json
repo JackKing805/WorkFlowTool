@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "generatedBy": "manual",
+  "notes": [
+    "该清单用于记录离线运行时、wheel、模型和许可证来源。",
+    "实际分发时请补全文件哈希、版本号和许可证文本。"
+  ],
+  "pythonRuntime": [],
+  "wheels": [],
+  "nativeLibraries": [],
+  "models": [
+    {
+      "name": "workflowtool-offline-polygon-heuristic",
+      "path": "python_detector/model/combined/model.json",
+      "license": "Project-local metadata"
+    }
+  ]
+}

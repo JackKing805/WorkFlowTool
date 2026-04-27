@@ -136,6 +136,7 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
                 check(trainRecent.exitCode == 0) { trainRecent.output.ifBlank { "最近样本微调失败" } }
                 log("图标模型已执行最近样本快速微调")
             }
+            AppRuntimeFiles.markUserModelUpdated()
         }
         if (update.magic) trainMagicModelIfNeeded()
         if (update.background) trainBackgroundModelIfNeeded()
@@ -169,8 +170,8 @@ fun AppController.trainBackgroundModelIfNeeded() {
 }
 
 fun shouldRunFullIconRetrain(): Boolean {
-    val best = AppRuntimeFiles.pythonDir.resolve("model").resolve("combined").resolve("runs").resolve("weights").resolve("best.pt")
-    if (!best.exists()) return true
+    val modelManifest = AppRuntimeFiles.pythonDir.resolve("model").resolve("combined").resolve("model.json")
+    if (!modelManifest.exists()) return true
     val feedbackManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
     if (!feedbackManifest.exists()) return false
     val sampleCount = runCatching {
@@ -243,10 +244,13 @@ fun trainingFingerprintFile(): Path {
 }
 
 fun runPythonCommand(vararg args: String): ProcessResult {
-    val process = ProcessBuilder(listOf("python") + args)
-        .directory(AppRuntimeFiles.pythonDir.toFile())
-        .redirectErrorStream(true)
-        .start()
+    val command = PythonRuntime.buildCommand(args.toList())
+        ?: return ProcessResult(127, "Python interpreter not found. Bundled offline runtime is required unless WORKFLOWTOOL_ALLOW_SYSTEM_PYTHON is enabled.")
+    val process = PythonRuntime.configureProcess(
+        ProcessBuilder(command)
+            .directory(AppRuntimeFiles.pythonDir.toFile())
+            .redirectErrorStream(true)
+    ).start()
     val output = process.inputStream.bufferedReader(Charsets.UTF_8).readText()
     return ProcessResult(process.waitFor(), output)
 }

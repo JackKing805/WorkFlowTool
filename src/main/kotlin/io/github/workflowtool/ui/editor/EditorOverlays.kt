@@ -109,20 +109,42 @@ fun CanvasContextItem(
 fun RegionNumberBadges(
     regions: List<CropRegion>,
     zoom: Float,
-    viewportOffset: Offset
+    viewportOffset: Offset,
+    hoveredRegionId: String?
 ) {
     regions.forEachIndexed { index, region ->
+        val selected = region.selected
+        val hovered = hoveredRegionId == region.id
+        val size = when {
+            selected -> 20.dp
+            hovered -> 18.dp
+            else -> 15.dp
+        }
+        val badgeColor = when {
+            selected -> Color(0xFF2F6BFF)
+            hovered -> Color(0xFF3E79F0)
+            else -> Accent.copy(alpha = 0.58f)
+        }
+        val textColor = if (selected || hovered) Color.White else Color.White.copy(alpha = 0.8f)
         Box(
             Modifier.offset(
                 (region.x * zoom + viewportOffset.x + 1).roundToInt().dp,
                 (region.y * zoom + viewportOffset.y + 1).roundToInt().dp
             )
-                .size(20.dp)
+                .size(size)
                 .clip(CircleShape)
-                .background(Accent),
+                .background(badgeColor),
             contentAlignment = Alignment.Center
         ) {
-            Text((index + 1).toString(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            val fontSize = if (selected) 10.sp else 9.sp
+            Text(
+                text = (index + 1).toString(),
+                color = textColor,
+                modifier = Modifier.offset(y = (-0.5).dp),
+                fontSize = fontSize,
+                lineHeight = fontSize,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
@@ -187,4 +209,3 @@ fun CanvasContextMenu(
         }
     }
 }
-

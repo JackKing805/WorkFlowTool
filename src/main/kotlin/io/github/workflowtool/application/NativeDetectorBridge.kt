@@ -30,7 +30,14 @@ internal object CppDetectorBridge : NativeDetectorBridge, NativeMagicBridge {
         else -> "libcpp_detector.so"
     }
 
-    private val libraryFile = AppRuntimeFiles.nativeLibraryFile ?: File("native/cpp_detector/build/release/$libraryName")
+    private val libraryFile: File by lazy {
+        listOfNotNull(
+            AppRuntimeFiles.nativeLibraryFile,
+            File("native/cpp_detector/build/release/$libraryName"),
+            File("native/cpp_detector/build/release/Release/$libraryName"),
+            File("native/cpp_detector/build/Release/$libraryName")
+        ).firstOrNull { it.exists() } ?: File("native/cpp_detector/build/release/$libraryName")
+    }
 
     private val nativeLibrary: CppDetectorLibrary? by lazy {
         runCatching {

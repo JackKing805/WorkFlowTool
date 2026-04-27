@@ -64,6 +64,51 @@ class NativeDetectorBridgeTest {
     }
 
     @Test
+    fun mapsNativePolygonPointsIntoDomainResult() {
+        val regionSize = NativeRegion().size()
+        val pointSize = NativePoint().size()
+        val regionMemory = Memory(regionSize.toLong())
+        val pointsMemory = Memory((pointSize * 4).toLong())
+
+        listOf(4 to 6, 16 to 6, 16 to 20, 4 to 20).forEachIndexed { index, (x, y) ->
+            NativePoint(pointsMemory.share(index.toLong() * pointSize)).apply {
+                this.x = x
+                this.y = y
+                write()
+            }
+        }
+
+        NativeRegion(regionMemory.share(0)).apply {
+            x = 4
+            y = 6
+            width = 12
+            height = 14
+            visible = 1
+            selected = 1
+            pointCount = 4
+            points = pointsMemory
+            score = 0.91f
+            write()
+        }
+
+        val nativeResult = NativeDetectionResult().apply {
+            mode = 1
+            regionCount = 1
+            regions = regionMemory
+            stats = NativeDetectionStats().apply { write() }
+            write()
+        }
+
+        val result = nativeResult.toDomainResult()
+
+        assertEquals(1, result.regions.size)
+        assertEquals(4, result.regions.first().points.size)
+        assertEquals(16, result.regions.first().points[1].x)
+        assertEquals(20, result.regions.first().points[2].y)
+        assertEquals(0.91f, result.regions.first().score)
+    }
+
+    @Test
     fun mapsUnknownModeToFallback() {
         assertEquals(DetectionMode.FALLBACK_BACKGROUND, detectionModeFromNative(99))
     }

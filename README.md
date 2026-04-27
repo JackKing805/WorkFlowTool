@@ -6,27 +6,58 @@
 
 - Kotlin/JVM 17
 - Compose Multiplatform Desktop
-- Java AWT/ImageIO 图像处理核心
-- Rust 原生图像检测后端
-- `imageproc` 纯 Rust 图像连通域识别
 
 ## 运行
 
-```powershell
-gradle run
+macOS / Linux:
+
+```bash
+chmod +x ./gradlew
+./gradlew run
 ```
 
-如果使用 Gradle Wrapper：
+Windows:
 
 ```powershell
 .\gradlew.bat run
 ```
 
+如果你本机已经安装了 `gradle`，也可以直接运行：
+
+```bash
+gradle run
+```
+
+默认不会强制编译 C++ 原生检测器，这样在没有安装 `cmake` 的 mac 上也能先启动应用。
+如果你需要启用原生 C++ 检测/智能网格加速，可以使用：
+
+```bash
+./gradlew run -PbuildNativeDetector=true
+```
+
+当前原生检测器只保留内置 builtin 后端。
+macOS 下如果没有安装 `cmake`，构建会自动回退到 `xcrun clang++` 直接编译 `libcpp_detector.dylib`。
+
+Python 检测默认优先使用项目内离线 Python 运行时。开发阶段如果还没放入 `third_party/python/<platform>/`，可以显式设置 `WORKFLOWTOOL_ALLOW_SYSTEM_PYTHON=true` 临时回退到系统 Python。
+
+应用启动时会执行一次离线依赖自检，检查：
+
+- 项目内 Python 是否存在
+- `third_party/wheels/<platform>/` 下是否存在离线 wheel / venv 文件
+- 本地模型是否存在
+- 本地原生库是否存在
+
+如果需要提前把仓库内离线资产整理到指定运行目录，可执行：
+
+```bash
+python3 scripts/prepare_offline_runtime.py --target /tmp/workflowtool-runtime --clean
+```
+
 
 ## 打包
 
-```powershell
-gradle packageDistributionForCurrentOS
+```bash
+./gradlew packageDistributionForCurrentOS
 ```
 
 配置中已包含 Windows `exe/msi`、macOS `dmg`、Linux `deb/rpm` 目标格式。

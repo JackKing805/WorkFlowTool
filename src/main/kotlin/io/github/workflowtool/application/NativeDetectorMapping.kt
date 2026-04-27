@@ -10,6 +10,7 @@ internal fun NativeDetectionResult.toDomainResult(): DetectionResult {
     read()
     stats.read()
     val regionStructSize = NativeRegion().size()
+    val pointStructSize = NativePoint().size()
     val decodedRegions = buildList(regionCount.coerceAtLeast(0)) {
         val basePointer = regions ?: return@buildList
         repeat(regionCount.coerceAtLeast(0)) { index ->
@@ -22,7 +23,9 @@ internal fun NativeDetectionResult.toDomainResult(): DetectionResult {
                     width = region.width,
                     height = region.height,
                     visible = region.visible.toBooleanFlag(default = true),
-                    selected = region.selected.toBooleanFlag(default = false)
+                    selected = region.selected.toBooleanFlag(default = false),
+                    points = decodeNativePoints(region.points, region.pointCount, pointStructSize),
+                    score = region.score.takeIf { it.isFinite() && it > 0f }
                 )
             )
         }
@@ -48,6 +51,8 @@ internal fun NativeMagicResult.toMagicSelectionResult(): MagicSelectionResult? {
     if (found.toInt() != 1 || mask == null || maskLength <= 0) return null
     val bytes = mask!!.getByteArray(0, maskLength)
     val decodedMask = BooleanArray(maskLength) { index -> bytes[index].toInt() != 0 }
+    val pointStructSize = NativePoint().size()
+    val nativePoints = decodeNativePoints(region.points, region.pointCount, pointStructSize)
     return MagicSelectionResult(
         region = CropRegion(
             id = java.util.UUID.randomUUID().toString(),
@@ -57,7 +62,8 @@ internal fun NativeMagicResult.toMagicSelectionResult(): MagicSelectionResult? {
             height = region.height,
             visible = region.visible.toBooleanFlag(default = true),
             selected = true,
-            points = magicMaskOutline(decodedMask, imageWidth, imageHeight)
+            points = nativePoints.ifEmpty { magicMaskOutline(decodedMask, imageWidth, imageHeight) },
+            score = region.score.takeIf { it.isFinite() && it > 0f }
         ),
         mask = decodedMask,
         imageWidth = imageWidth,
@@ -66,6 +72,16 @@ internal fun NativeMagicResult.toMagicSelectionResult(): MagicSelectionResult? {
         seedY = seedY,
         pixelCount = pixelCount
     )
+}
+
+private fun decodeNativePoints(pointer: com.sun.jna.Pointer?, pointCount: Int, pointStructSize: Int): List<RegionPoint> {
+    if (pointer == null || pointCount <= 0) return emptyList()
+    return buildList(pointCount.coerceAtLeast(0)) {
+        repeat(pointCount.coerceAtLeast(0)) { index ->
+            val point = NativePoint(pointer.share(index.toLong() * pointStructSize)).apply { read() }
+            add(RegionPoint(point.x, point.y))
+        }
+    }
 }
 
 private fun magicMaskOutline(mask: BooleanArray, width: Int, height: Int): List<RegionPoint> {

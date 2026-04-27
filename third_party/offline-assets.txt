@@ -1,0 +1,12 @@
+# Relative paths under third_party/ that should be copied into the runtime root.
+offline-assets.txt
+README.md
+THIRD_PARTY_MANIFEST.json
+python/macos/README.md
+python/macos/bin/python3
+python/macos/bin/python
+python/windows/README.md
+python/linux/README.md
+wheels/macos/README.md
+wheels/windows/README.md
+wheels/linux/README.md

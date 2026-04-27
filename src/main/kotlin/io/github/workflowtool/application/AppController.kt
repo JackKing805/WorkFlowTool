@@ -25,6 +25,7 @@ import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.GridConfig
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
+import io.github.workflowtool.model.primaryRegionFor
 import io.github.workflowtool.model.RegionPoint
 import io.github.workflowtool.model.SplitSource
 import io.github.workflowtool.model.ToolMode
@@ -53,8 +54,11 @@ class AppController(
     val layoutSpec: LayoutSpec,
     val localization: LocalizationProvider,
     private val layoutPolicy: LayoutConstraintPolicy,
-    private val nativeEngine: NativeImageEngine = CppOnlyNativeImageEngine,
-    private val previewExporter: IconExporter = IconExporter()
+    private val nativeEngine: NativeImageEngine = PythonThenCppImageEngine,
+    private val previewExporter: IconExporter = IconExporter(),
+    private val persistenceEnabled: Boolean = detector is CompositeRegionDetector &&
+        splitter is CppRegionSplitter &&
+        exporter is JvmRegionExporter
 ) {
     internal val history = EditorHistory()
     private val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -67,6 +71,8 @@ class AppController(
     var imageFile by mutableStateOf<File?>(null)
         internal set
     var imageFiles by mutableStateOf<List<File>>(emptyList())
+        internal set
+    var recentFiles by mutableStateOf<List<File>>(emptyList())
         internal set
     var currentImageIndex by mutableStateOf(-1)
         internal set
@@ -139,13 +145,26 @@ class AppController(
 
     val logs = mutableStateListOf<String>()
 
+    init {
+        if (persistenceEnabled) applyPersistedSettings(AppSettingsStore.load())
+        logOfflineDependencyReport()
+    }
+
     val regions: List<CropRegion> get() = history.state.regions
     val canUndo: Boolean get() = history.canUndo
     val canRedo: Boolean get() = history.canRedo
     val isBusy: Boolean get() = busyMessage != null
-    val isNativeSplitAvailable: Boolean get() = nativeEngine.isAvailable
-    val selectedRegion: CropRegion? get() = regions.lastOrNull { it.selected }
-    val previewRegion: CropRegion? get() = previewRegionId?.let { id -> regions.lastOrNull { it.id == id } }
+    val isAutoDetectAvailable: Boolean get() = nativeEngine.isAvailable
+    val isGridSplitAvailable: Boolean get() = CppDetectorBridge.isLoaded
+    val canRegenerateBase: Boolean
+        get() = when (splitSource) {
+            SplitSource.AutoDetect -> isAutoDetectAvailable
+            SplitSource.SmartGrid -> isGridSplitAvailable
+        }
+    val selectedRegion: CropRegion?
+        get() = regions.lastOrNull { it.selected }?.let { primaryRegionFor(regions, it.id) ?: it }
+    val previewRegion: CropRegion?
+        get() = previewRegionId?.let { id -> primaryRegionFor(regions, id) ?: regions.lastOrNull { it.id == id } }
     val baseSourceLabel: String
         get() = when (splitSource) {
             SplitSource.AutoDetect -> "自动识别"
@@ -179,6 +198,19 @@ class AppController(
     fun log(message: String) {
         val time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
         logs += "[$time] $message"
+    }
+
+    private fun logOfflineDependencyReport() {
+        val report = AppRuntimeFiles.offlineDependencyReport()
+        log(report.summary())
+        report.statuses
+            .filter { !it.ok }
+            .forEach { status ->
+                log("${status.name} 缺失：${status.detail}")
+            }
+        if (report.statuses.all { it.ok }) {
+            log("离线运行依赖已就绪")
+        }
     }
 
     fun applyLayoutBounds(bounds: LayoutBounds) {
@@ -337,7 +369,7 @@ class AppController(
             log("请先打开图片")
             return
         }
-        val region = regions.lastOrNull { it.id == regionId }
+        val region = primaryRegionFor(regions, regionId) ?: regions.lastOrNull { it.id == regionId }
         if (region == null) {
             log("未找到要导出的区域")
             return
@@ -358,7 +390,7 @@ class AppController(
 
         runCatching {
             val config = buildExportConfig()
-            val written = previewExporter.exportSingle(loaded, region, config, destination)
+            val written = previewExporter.exportSingle(loaded, region, regions, config, destination)
             check(written) { "No writer available for ${config.outputFormat.extension}" }
         }.onSuccess {
             log("预览区域已导出：${destination.fileName}")
@@ -383,6 +415,10 @@ class AppController(
     }
 
     fun enterMagicSelectionMode() {
+        if (!isGridSplitAvailable) {
+            log("C++ 检测后端不可用，魔棒工具已禁用")
+            return
+        }
         updateToolMode(ToolMode.Magic)
     }
 
@@ -454,7 +490,7 @@ class AppController(
 
     fun openRegionPreview(regionId: String) {
         if (regions.none { it.id == regionId }) return
-        previewRegionId = regionId
+        previewRegionId = primaryRegionFor(regions, regionId)?.id ?: regionId
     }
 
     fun closeRegionPreview() {
@@ -507,8 +543,70 @@ class AppController(
         hasManualEdits = trainingComparableRegions(regions) != trainingComparableRegions(baseRegions)
     }
 
+    internal fun persistSettings() {
+        if (!persistenceEnabled) return
+        AppSettingsStore.save(
+            AppSettings(
+                detectionConfig = detectionConfig,
+                gridConfig = gridConfig,
+                outputDirectory = outputDirectory,
+                outputFormat = outputFormat,
+                namingMode = namingMode,
+                customPrefix = customPrefix,
+                keepOriginalSize = keepOriginalSize,
+                trimTransparent = trimTransparent,
+                removeBackgroundToTransparent = removeBackgroundToTransparent,
+                backgroundRemovalTolerance = backgroundRemovalTolerance,
+                padToSquare = padToSquare,
+                fixedSizeText = fixedSizeText,
+                overwriteExisting = overwriteExisting,
+                continuousTrainingEnabled = continuousTrainingEnabled,
+                showGrid = showGrid,
+                recentFiles = recentFiles.map { it.toPath() }
+            )
+        )
+    }
+
+    private fun applyPersistedSettings(settings: AppSettings) {
+        detectionConfig = settings.detectionConfig
+        magicTolerance = settings.detectionConfig.colorDistanceThreshold
+        gridConfig = settings.gridConfig
+        settings.outputDirectory?.let { outputDirectory = it }
+        outputFormat = settings.outputFormat
+        namingMode = settings.namingMode
+        customPrefix = settings.customPrefix
+        keepOriginalSize = settings.keepOriginalSize
+        trimTransparent = settings.trimTransparent
+        removeBackgroundToTransparent = settings.removeBackgroundToTransparent
+        backgroundRemovalTolerance = settings.backgroundRemovalTolerance
+        padToSquare = settings.padToSquare
+        fixedSizeText = settings.fixedSizeText
+        overwriteExisting = settings.overwriteExisting
+        continuousTrainingEnabled = settings.continuousTrainingEnabled
+        showGrid = settings.showGrid
+        recentFiles = AppSettingsStore.sanitizedRecentFiles(settings.recentFiles).map(Path::toFile)
+    }
+
+    internal fun rememberRecentFile(file: File) {
+        val path = file.toPath().toAbsolutePath().normalize()
+        recentFiles = AppSettingsStore.sanitizedRecentFiles(listOf(path) + recentFiles.map { it.toPath() }).map(Path::toFile)
+        persistSettings()
+    }
+
     internal fun normalizeRegionIds(input: List<CropRegion>): List<CropRegion> {
-        return input.mapIndexed { index, region -> region.copy(id = (index + 1).toString()) }
+        val usedIds = mutableSetOf<String>()
+        var nextId = 1
+        fun nextAvailableId(): String {
+            while (nextId.toString() in usedIds) nextId++
+            return nextId.toString().also {
+                usedIds += it
+                nextId++
+            }
+        }
+        return input.map { region ->
+            val id = region.id.takeIf { it.isNotBlank() && usedIds.add(it) } ?: nextAvailableId()
+            region.copy(id = id)
+        }
     }
 
     internal fun regenerateBaseSafely(logResult: Boolean) {
@@ -568,7 +666,11 @@ class AppController(
 
     private fun detectMagicAt(loaded: BufferedImage, x: Int, y: Int): MagicSelectionResult? {
         if (x !in 0 until loaded.width || y !in 0 until loaded.height) return null
-        val tolerance = MagicToleranceModel.predict(loaded.getRGB(x, y), magicTolerance)
+        val tolerance = if (persistenceEnabled) {
+            MagicToleranceModel.predict(loaded.getRGB(x, y), magicTolerance)
+        } else {
+            magicTolerance
+        }
         return detectMagicRegion(
             loaded,
             x,

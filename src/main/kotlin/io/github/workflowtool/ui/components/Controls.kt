@@ -65,9 +65,25 @@ fun PanelCard(title: String, modifier: Modifier = Modifier, content: @Composable
 
 @Composable
 fun StatusLine(label: String, value: String, multilineValue: Boolean = false) {
+    if (multilineValue) {
+        Column(
+            Modifier.fillMaxWidth().clip(ControlShape).background(ControlBg).border(1.dp, Border, ControlShape).padding(horizontal = 10.dp, vertical = 8.dp)
+        ) {
+            Text(label, color = TextMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                value,
+                color = Color.White,
+                fontSize = 13.sp,
+                maxLines = 6,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        return
+    }
     Row(
         Modifier.fillMaxWidth().clip(ControlShape).background(ControlBg).border(1.dp, Border, ControlShape).padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = if (multilineValue) Alignment.Top else Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, color = TextMuted, fontSize = 13.sp, modifier = Modifier.weight(1f))
         Spacer(Modifier.width(10.dp))
@@ -75,8 +91,8 @@ fun StatusLine(label: String, value: String, multilineValue: Boolean = false) {
             value,
             color = Color.White,
             fontSize = 13.sp,
-            maxLines = if (multilineValue) 4 else 1,
-            overflow = if (multilineValue) TextOverflow.Clip else TextOverflow.Ellipsis,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.End,
             modifier = Modifier.widthIn(max = 180.dp)
         )

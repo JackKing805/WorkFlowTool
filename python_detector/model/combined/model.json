@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "backend": "polygon_heuristic_v1",
+  "createdAt": "2026-04-27T09:47:47.493662+00:00",
+  "training": {
+    "dataset": "training_sets/combined",
+    "epochs": 4,
+    "imgsz": 512,
+    "batch": 2
+  },
+  "defaults": {
+    "alphaThreshold": 8,
+    "edgeSampleWidth": 2,
+    "bboxPadding": 1,
+    "minPixelArea": 790,
+    "colorDistanceThreshold": 34,
+    "minWidth": 49,
+    "minHeight": 49
+  },
+  "heuristics": {
+    "distanceScale": 1.3,
+    "distanceOffset": 6.462,
+    "mergeGap": 6,
+    "scoreFloor": 0.22,
+    "rowSampleTarget": 96,
+    "polygonSimplifyTolerance": 2,
+    "detectInteriorHoles": true,
+    "holeMinAreaRatio": 0.125,
+    "holeMaxAreaRatio": 0.72
+  },
+  "summary": {
+    "sampleCount": 3,
+    "instanceCount": 159,
+    "holeInstanceCount": 0,
+    "medianWidth": 77,
+    "medianHeight": 77,
+    "medianArea": 6080,
+    "medianPointCount": 43,
+    "medianContrast": 59.85
+  }
+}

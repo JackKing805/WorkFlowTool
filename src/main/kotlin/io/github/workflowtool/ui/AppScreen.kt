@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import io.github.workflowtool.application.AppController
 import io.github.workflowtool.application.clearRegions
+import io.github.workflowtool.application.clearSelection
 import io.github.workflowtool.application.focusRegion
 import io.github.workflowtool.application.removeRegion
 import io.github.workflowtool.application.replaceRegions
@@ -119,6 +120,7 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 onMagicExtend = controller::extendMagicSelection,
                                 onBackgroundPick = controller::sampleBackgroundAt,
                                 onHover = controller::updatePointerHover,
+                                onClearSelection = controller::clearSelection,
                                 onDeleteRegion = controller::removeRegion,
                                 onToggleRegionVisibility = controller::toggleVisibility,
                                 onFocusRegion = controller::selectAndFocusRegion,

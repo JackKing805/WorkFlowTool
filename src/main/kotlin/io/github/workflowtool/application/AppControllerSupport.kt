@@ -101,10 +101,16 @@ fun estimateCornerBackgroundArgb(image: BufferedImage): Int {
 }
 
 fun buildTrainingJsonLine(imagePath: String, imageHash: String, regions: List<CropRegion>): String {
+    val instances = regions.joinToString(",") { region ->
+        val points = region.editPoints.joinToString(",") { point ->
+            """{"x":${point.x},"y":${point.y}}"""
+        }
+        """{"bbox":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}},"points":[$points],"label":"icon"}"""
+    }
     val boxes = regions.joinToString(",") { region ->
         """{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}"""
     }
-    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","regions":[$boxes]}"""
+    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","instances":[$instances],"regions":[$boxes]}"""
 }
 
 fun buildMagicTrainingJsonLine(

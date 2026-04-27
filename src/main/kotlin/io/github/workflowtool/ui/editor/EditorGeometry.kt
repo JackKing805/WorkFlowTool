@@ -62,10 +62,33 @@ fun screenToImage(point: Offset, viewportOffset: Offset, zoom: Float): Offset = 
 
 private fun Offset.div(value: Float) = Offset(x / value, y / value)
 
+internal data class RegionHitTarget(
+    val region: CropRegion,
+    val nearEdge: Boolean
+)
+
+internal fun handleHitRadius(zoom: Float): Float = (13f / zoom).coerceAtLeast(5.25f)
+
+internal fun handleVisualOuterRadius(selected: Boolean): Float = if (selected) 4.2f else 3.4f
+
+internal fun handleVisualInnerRadius(selected: Boolean): Float = if (selected) 2.4f else 1.9f
+
 fun findRegionHit(regions: List<CropRegion>, point: Offset): CropRegion? {
-    return regions.lastOrNull {
-        it.visible && pointInsideRegion(it, point)
+    return findRegionHitTarget(regions, point)?.region
+}
+
+internal fun findRegionHitTarget(regions: List<CropRegion>, point: Offset, zoom: Float = 1f): RegionHitTarget? {
+    val ordered = regions.indices
+        .sortedWith(
+            compareByDescending<Int> { regions[it].selected }
+                .thenByDescending { candidate -> candidate }
+        )
+    ordered.forEach { index ->
+        val region = regions[index]
+        if (!region.visible || !pointInsideRegion(region, point)) return@forEach
+        return RegionHitTarget(region, pointNearRegionEdge(region, point, zoom))
     }
+    return null
 }
 
 private fun pointInsideRegion(region: CropRegion, point: Offset): Boolean {
@@ -90,13 +113,18 @@ private fun pointInsideRegion(region: CropRegion, point: Offset): Boolean {
 
 fun findPointHit(region: CropRegion, point: Offset, zoom: Float): Int? {
     if (!region.visible) return null
-    val radius = (10f / zoom).coerceAtLeast(4f)
+    val radius = handleHitRadius(zoom)
     return region.editPoints.indexOfLast { abs(point.x - it.x) <= radius && abs(point.y - it.y) <= radius }
         .takeIf { it >= 0 }
 }
 
 fun findHandleHit(regions: List<CropRegion>, point: Offset, zoom: Float): Pair<CropRegion, Int>? {
-    for (index in regions.indices.reversed()) {
+    val ordered = regions.indices
+        .sortedWith(
+            compareByDescending<Int> { regions[it].selected }
+                .thenByDescending { candidate -> candidate }
+        )
+    for (index in ordered) {
         val region = regions[index]
         val pointIndex = findPointHit(region, point, zoom)
         if (pointIndex != null) return region to pointIndex
@@ -181,3 +209,20 @@ private fun distanceToSegment(point: RegionPoint, start: RegionPoint, end: Regio
     return px * px + py * py
 }
 
+private fun pointNearRegionEdge(region: CropRegion, point: Offset, zoom: Float): Boolean {
+    val points = region.editPoints
+    if (points.size < 2) return false
+    val threshold = (11f / zoom).coerceAtLeast(4.5f)
+    for (index in points.indices) {
+        val next = points[(index + 1) % points.size]
+        if (distanceToSegment(
+                RegionPoint(point.x.roundToInt(), point.y.roundToInt()),
+                points[index],
+                next
+            ) <= threshold * threshold
+        ) {
+            return true
+        }
+    }
+    return false
+}

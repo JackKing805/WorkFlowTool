@@ -96,6 +96,7 @@ fun EditorCanvas(
     onMagicExtend: (Offset) -> Unit,
     onBackgroundPick: (Offset) -> Unit,
     onHover: (Offset?) -> Unit,
+    onClearSelection: () -> Unit,
     onDeleteRegion: (String) -> Unit,
     onToggleRegionVisibility: (String) -> Unit,
     onFocusRegion: (String, Boolean) -> Unit,
@@ -108,6 +109,7 @@ fun EditorCanvas(
     var draftRegion by remember { mutableStateOf<CropRegion?>(null) }
     var contextMenu by remember { mutableStateOf<CanvasContextMenuState?>(null) }
     var pointerPosition by remember { mutableStateOf<Offset?>(null) }
+    var hoveredRegionId by remember { mutableStateOf<String?>(null) }
     val latestRegions by rememberUpdatedState(regions)
     val latestZoom by rememberUpdatedState(zoom)
     val latestViewportOffset by rememberUpdatedState(viewportOffset)
@@ -141,6 +143,7 @@ fun EditorCanvas(
                     val hit = findRegionHit(latestRegions, imagePoint)
                     if (hit != null) {
                         onSelect(hit.id, false)
+                        hoveredRegionId = hit.id
                     }
                 }
                 if (!event.buttons.isSecondaryPressed) return@onPointerEvent
@@ -148,6 +151,7 @@ fun EditorCanvas(
                 val hit = findRegionHit(latestRegions, imagePoint)
                 if (hit != null) {
                     onSelect(hit.id, false)
+                    hoveredRegionId = hit.id
                 }
                 contextMenu = CanvasContextMenuState(
                     regionId = hit?.id,
@@ -183,8 +187,10 @@ fun EditorCanvas(
                             val hit = findRegionHit(latestRegions, imagePoint)
                             if (hit != null) {
                                 onSelect(hit.id, false)
+                                hoveredRegionId = hit.id
                                 return@detectTapGestures
                             }
+                            onClearSelection()
                             if (latestToolMode == ToolMode.Magic) {
                                 onMagicSelect(imagePoint)
                             }
@@ -194,10 +200,13 @@ fun EditorCanvas(
                 .onPointerEvent(PointerEventType.Move) { event ->
                     val point = event.changes.firstOrNull()?.position ?: return@onPointerEvent
                     pointerPosition = point
-                    onHover(screenToImage(point, latestViewportOffset, latestZoom))
+                    val imagePoint = screenToImage(point, latestViewportOffset, latestZoom)
+                    hoveredRegionId = findRegionHit(renderedRegions, imagePoint)?.id
+                    onHover(imagePoint)
                 }
                 .onPointerEvent(PointerEventType.Exit) {
                     pointerPosition = null
+                    hoveredRegionId = null
                     onHover(null)
                 }
                 .onPointerEvent(PointerEventType.Scroll) { event ->
@@ -223,6 +232,7 @@ fun EditorCanvas(
                                 }
                                 handleHit != null || hit != null -> {
                                     val active = handleHit?.first ?: hit!!
+                                    hoveredRegionId = active.id
                                     val base = latestRegions.map {
                                         if (it.id == active.id) it.copy(selected = true) else if (!it.selected) it else it.copy(selected = false)
                                     }
@@ -260,6 +270,7 @@ fun EditorCanvas(
                                 DragKind.Pan -> onPan(dragAmount)
                                 DragKind.RegionEdit -> {
                                     val current = screenToImage(change.position, latestViewportOffset, latestZoom)
+                                    hoveredRegionId = session.regionId
                                     val next = if (session.pointIndex != null) {
                                         session.baseRegions.map {
                                             if (it.id == session.regionId) moveRegionPoint(it, session.pointIndex, current, maxWidth, maxHeight) else it
@@ -332,8 +343,7 @@ fun EditorCanvas(
                 drawSeedMarker(it.seedX, it.seedY, zoom, viewportOffset)
             }
             visibleOverlayRegions.forEach { region ->
-                val color = if (region.selected) Color(0xFF74A5FF) else Accent
-                drawRegionOutline(region, zoom, viewportOffset, color)
+                drawRegionOutline(region, zoom, viewportOffset, overlayStyleForRegion(region, hoveredRegionId))
             }
         }
 
@@ -341,7 +351,7 @@ fun EditorCanvas(
             pointerPosition?.let { EyedropperCursor(it) }
         }
 
-        RegionNumberBadges(visibleOverlayRegions, zoom, viewportOffset)
+        RegionNumberBadges(visibleOverlayRegions, zoom, viewportOffset, hoveredRegionId)
 
         contextMenu?.let { state ->
             CanvasContextMenu(
@@ -362,4 +372,3 @@ fun EditorCanvas(
         }
     }
 }
-

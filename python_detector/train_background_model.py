@@ -1,50 +1,43 @@
-#!/usr/bin/env python3
-import argparse
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import Dict, List
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Train a lightweight background color correction model.")
-    parser.add_argument("--dataset", default=str(SCRIPT_DIR / "training_sets" / "background_feedback"))
-    parser.add_argument("--out", default=str(SCRIPT_DIR / "model" / "background"))
-    args = parser.parse_args()
-
-    dataset = Path(args.dataset)
-    records = load_records(dataset)
-    model_records = [
-        {
-            "edgeArgb": int(record["edgeArgb"]),
-            "backgroundArgb": int(record["backgroundArgb"]),
-        }
-        for record in records
-    ]
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    model = {"status": "trained", "count": len(model_records), "records": model_records}
-    (out / "model.json").write_text(json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"status": "trained", "records": len(model_records), "model": str(out / "model.json")}, ensure_ascii=False))
+from offline_common import read_jsonl, write_json
 
 
-def load_records(dataset):
-    manifest = dataset / "annotations.jsonl"
-    if not manifest.exists():
-        raise SystemExit("Missing background feedback annotations.jsonl")
-    records = []
-    for line_number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
+def main() -> int:
+    root = Path(__file__).resolve().parent
+    output_file = root / "model" / "background" / "model.json"
+    records: List[Dict[str, int]] = []
+
+    for dataset_root in (root / "training_sets" / "background_seed", root / "training_sets" / "background_feedback"):
+        for item in read_jsonl(dataset_root / "annotations.jsonl"):
+            try:
+                edge_argb = int(item.get("edgeArgb"))
+                background_argb = int(item.get("backgroundArgb"))
+            except (TypeError, ValueError):
+                continue
+            records.append({"edgeArgb": edge_argb, "backgroundArgb": background_argb})
+
+    payload = {"version": 1, "records": dedupe(records)}
+    write_json(output_file, payload)
+    print(json.dumps({"records": len(payload["records"]), "output": str(output_file)}, ensure_ascii=False))
+    return 0
+
+
+def dedupe(records: List[Dict[str, int]]) -> List[Dict[str, int]]:
+    seen = set()
+    output = []
+    for record in records:
+        key = (record["edgeArgb"], record["backgroundArgb"])
+        if key in seen:
             continue
-        record = json.loads(line)
-        for key in ("edgeArgb", "backgroundArgb"):
-            if key not in record:
-                raise SystemExit(f"Line {line_number}: missing {key}")
-        records.append(record)
-    if not records:
-        raise SystemExit("No background training records found")
-    return records
+        seen.add(key)
+        output.append(record)
+    return output
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

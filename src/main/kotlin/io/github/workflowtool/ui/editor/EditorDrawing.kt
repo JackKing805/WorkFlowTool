@@ -58,6 +58,19 @@ import kotlin.math.roundToInt
 import java.awt.Cursor
 import java.util.UUID
 
+internal data class RegionOverlayStyle(
+    val strokeColor: Color,
+    val fillColor: Color,
+    val accentColor: Color,
+    val secondaryStrokeColor: Color,
+    val strokeWidth: Float,
+    val showAllHandles: Boolean,
+    val showHandles: Boolean,
+    val emphasizeCorners: Boolean,
+    val handleOuterRadius: Float,
+    val handleInnerRadius: Float
+)
+
 fun DrawScope.drawCheckerboard(size: Size) {
     val cell = 16f
     var y = 0f
@@ -93,12 +106,12 @@ fun DrawScope.drawGrid(size: Size, zoom: Float, viewportOffset: Offset) {
     }
 }
 
-fun DrawScope.drawHandle(center: Offset, color: Color) {
-    drawCircle(color = Color.White, radius = 5f, center = center)
-    drawCircle(color = color, radius = 3.2f, center = center)
+fun DrawScope.drawHandle(center: Offset, outerRadius: Float, innerRadius: Float, accentColor: Color, outerColor: Color, alpha: Float = 1f) {
+    drawCircle(color = outerColor.copy(alpha = alpha), radius = outerRadius, center = center)
+    drawCircle(color = accentColor.copy(alpha = alpha), radius = innerRadius, center = center)
 }
 
-fun DrawScope.drawRegionOutline(region: CropRegion, zoom: Float, viewportOffset: Offset, color: Color) {
+internal fun DrawScope.drawRegionOutline(region: CropRegion, zoom: Float, viewportOffset: Offset, style: RegionOverlayStyle) {
     val points = region.editPoints.map { Offset(it.x * zoom, it.y * zoom) + viewportOffset }
     if (points.size < 3) return
 
@@ -107,13 +120,29 @@ fun DrawScope.drawRegionOutline(region: CropRegion, zoom: Float, viewportOffset:
         points.drop(1).forEach { lineTo(it.x, it.y) }
         close()
     }
-    val stroke = Stroke(
-        width = if (region.selected) 3f else 2f,
-        pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f))
+    val dash = if (region.selected) floatArrayOf(10f, 5f) else floatArrayOf(8f, 6f)
+    drawPath(path, style.fillColor)
+    drawPath(
+        path,
+        style.secondaryStrokeColor,
+        style = Stroke(width = (style.strokeWidth + 1.3f).coerceAtMost(4.4f), pathEffect = PathEffect.dashPathEffect(dash))
     )
-    drawPath(path, color.copy(alpha = 0.16f))
-    drawPath(path, color, style = stroke)
-    points.forEach { drawHandle(it, color) }
+    drawPath(
+        path,
+        style.strokeColor,
+        style = Stroke(width = style.strokeWidth, pathEffect = PathEffect.dashPathEffect(dash))
+    )
+    if (!style.showHandles) return
+
+    val emphasized = emphasizedHandleIndices(region)
+    points.forEachIndexed { index, point ->
+        if (!style.showAllHandles && index !in emphasized) return@forEachIndexed
+        val isEmphasized = !style.emphasizeCorners || index in emphasized
+        val outerRadius = if (isEmphasized) style.handleOuterRadius else (style.handleOuterRadius - 0.9f).coerceAtLeast(2.35f)
+        val innerRadius = if (isEmphasized) style.handleInnerRadius else (style.handleInnerRadius - 0.55f).coerceAtLeast(1.25f)
+        val alpha = if (isEmphasized) 1f else 0.58f
+        drawHandle(point, outerRadius, innerRadius, style.accentColor, Color.White, alpha)
+    }
 }
 
 fun DrawScope.drawMagicMask(preview: MagicSelectionPreview, zoom: Float, viewportOffset: Offset) {
@@ -192,3 +221,58 @@ fun DrawScope.drawSeedMarker(seedX: Int, seedY: Int, zoom: Float, viewportOffset
     drawCircle(Color(0xFF1E9BFF), radius = radius * 0.45f, center = center)
 }
 
+internal fun overlayStyleForRegion(region: CropRegion, hoveredRegionId: String?): RegionOverlayStyle {
+    val selected = region.selected
+    val hovered = hoveredRegionId == region.id
+    return when {
+        selected -> RegionOverlayStyle(
+            strokeColor = Color(0xFF6EA2FF),
+            fillColor = Color(0x123F83FF),
+            accentColor = Color(0xFF2F6BFF),
+            secondaryStrokeColor = Color(0xCCF5F9FF),
+            strokeWidth = 2.3f,
+            showAllHandles = true,
+            showHandles = true,
+            emphasizeCorners = true,
+            handleOuterRadius = handleVisualOuterRadius(selected = true),
+            handleInnerRadius = handleVisualInnerRadius(selected = true)
+        )
+        hovered -> RegionOverlayStyle(
+            strokeColor = Color(0xFF82B5FF),
+            fillColor = Color(0x0A74A5FF),
+            accentColor = Color(0xFF4E87FF),
+            secondaryStrokeColor = Color(0x66EAF2FF),
+            strokeWidth = 1.8f,
+            showAllHandles = region.points.isNotEmpty(),
+            showHandles = true,
+            emphasizeCorners = true,
+            handleOuterRadius = handleVisualOuterRadius(selected = false),
+            handleInnerRadius = handleVisualInnerRadius(selected = false)
+        )
+        else -> RegionOverlayStyle(
+            strokeColor = Color(0xD05F7DAE),
+            fillColor = Color(0x061D4A8A),
+            accentColor = Color(0xFF5C7CCB),
+            secondaryStrokeColor = Color(0x2EEAF2FF),
+            strokeWidth = 1.4f,
+            showAllHandles = false,
+            showHandles = false,
+            emphasizeCorners = false,
+            handleOuterRadius = handleVisualOuterRadius(selected = false),
+            handleInnerRadius = handleVisualInnerRadius(selected = false)
+        )
+    }
+}
+
+private fun emphasizedHandleIndices(region: CropRegion): Set<Int> {
+    val points = region.editPoints
+    if (points.isEmpty()) return emptySet()
+    if (region.points.isEmpty()) {
+        return setOf(0, 1, 2, 3).filter { it < points.size }.toSet()
+    }
+    return if (points.size <= 4) {
+        points.indices.toSet()
+    } else {
+        setOf(0, points.size / 3, (points.size * 2) / 3, points.lastIndex)
+    }
+}

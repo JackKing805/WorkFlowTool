@@ -10,7 +10,8 @@ data class CropRegion(
     val height: Int,
     val visible: Boolean = true,
     val selected: Boolean = false,
-    val points: List<RegionPoint> = emptyList()
+    val points: List<RegionPoint> = emptyList(),
+    val score: Float? = null
 ) {
     val right: Int get() = x + width
     val bottom: Int get() = y + height

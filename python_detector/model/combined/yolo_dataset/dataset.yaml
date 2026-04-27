@@ -1,5 +1,0 @@
-path: E:/Projects/JavaProjects/WorkFlowTool/python_detector/model/combined/yolo_dataset
-train: images/train
-val: images/train
-names:
-  0: icon

@@ -12,6 +12,45 @@ import io.github.workflowtool.model.DetectionConfig
 
 class PythonDetectorBridgeTest {
     @Test
+    fun parsesPolygonAwareDetectionPayload() {
+        val result = PythonDetectorBridge.parseDetectionResult(
+            """
+            {
+              "mode":"solid_background",
+              "regions":[
+                {
+                  "bbox":{"x":8,"y":10,"width":14,"height":16},
+                  "points":[
+                    {"x":8,"y":10},
+                    {"x":22,"y":10},
+                    {"x":22,"y":26},
+                    {"x":8,"y":26}
+                  ],
+                  "score":0.875
+                }
+              ],
+              "stats":{
+                "estimatedBackgroundArgb":-1234567,
+                "candidatePixels":128,
+                "connectedComponents":1,
+                "regionCount":1,
+                "backgroundSampleCount":24,
+                "totalTimeMs":9
+              }
+            }
+            """.trimIndent()
+        )
+
+        assertNotNull(result)
+        assertEquals(1, result.regions.size)
+        assertEquals(8, result.regions.first().x)
+        assertEquals(16, result.regions.first().height)
+        assertEquals(4, result.regions.first().points.size)
+        assertEquals(0.875f, result.regions.first().score)
+        assertEquals(128, result.stats.candidatePixels)
+    }
+
+    @Test
     fun detectsRegionsThroughPythonScriptWhenAvailable() {
         if (!PythonDetectorBridge.isAvailable) return
 
@@ -32,7 +71,8 @@ class PythonDetectorBridgeTest {
                 minHeight = 6,
                 minPixelArea = 16,
                 bboxPadding = 0,
-                colorDistanceThreshold = 24
+                colorDistanceThreshold = 24,
+                mergeNearbyRegions = false
             )
         )
 

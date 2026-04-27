@@ -102,8 +102,8 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
-    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height, region.points) {
-        controller.image?.let { previewCropper.cropPreview(it, region).toComposeImageBitmap() }
+    val bitmap = remember(controller.image, controller.regions, region.x, region.y, region.width, region.height, region.points) {
+        controller.image?.let { previewCropper.cropPreview(it, region, controller.regions).toComposeImageBitmap() }
     }
     if (bitmap == null) return
 
@@ -210,4 +210,3 @@ fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
 }
 
 internal val previewCropper = IconExporter()
-

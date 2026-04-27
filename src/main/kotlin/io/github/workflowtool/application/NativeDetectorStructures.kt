@@ -131,7 +131,17 @@ internal open class NativeGridConfig() : Structure() {
     }
 }
 
-@Structure.FieldOrder("x", "y", "width", "height", "visible", "selected")
+@Structure.FieldOrder("x", "y")
+internal open class NativePoint() : Structure() {
+    @JvmField var x: Int = 0
+    @JvmField var y: Int = 0
+
+    constructor(memory: Pointer) : this() {
+        useMemory(memory)
+    }
+}
+
+@Structure.FieldOrder("x", "y", "width", "height", "visible", "selected", "pointCount", "points", "score")
 internal open class NativeRegion() : Structure() {
     @JvmField var x: Int = 0
     @JvmField var y: Int = 0
@@ -139,6 +149,9 @@ internal open class NativeRegion() : Structure() {
     @JvmField var height: Int = 0
     @JvmField var visible: Byte = 1
     @JvmField var selected: Byte = 0
+    @JvmField var pointCount: Int = 0
+    @JvmField var points: Pointer? = null
+    @JvmField var score: Float = 0f
 
     constructor(memory: Pointer) : this() {
         useMemory(memory)

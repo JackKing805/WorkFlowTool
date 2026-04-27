@@ -1,6 +1,7 @@
 ﻿package io.github.workflowtool.application
 
 import io.github.workflowtool.model.CropRegion
+import io.github.workflowtool.model.groupMemberIdsFor
 import io.github.workflowtool.application.focusRegion
 
 fun AppController.clearRegions() {
@@ -30,9 +31,10 @@ fun AppController.replaceRegions(label: String, updated: List<CropRegion>, track
 
 fun AppController.selectRegion(regionId: String, additive: Boolean = false) {
     if (regions.none { it.id == regionId }) return
+    val groupIds = groupMemberIdsFor(regions, regionId).ifEmpty { setOf(regionId) }
     val updated = regions.map { region ->
         when {
-            region.id == regionId -> region.copy(selected = true)
+            region.id in groupIds -> region.copy(selected = true)
             additive -> region
             else -> region.copy(selected = false)
         }
@@ -55,16 +57,22 @@ fun AppController.clearSelection() =
 
 fun AppController.removeRegion(regionId: String) {
     if (regions.none { it.id == regionId }) return
-    replaceRegions("删除区域", regions.filterNot { it.id == regionId })
-    if (previewRegionId == regionId) {
+    val groupIds = groupMemberIdsFor(regions, regionId).ifEmpty { setOf(regionId) }
+    replaceRegions("删除区域", regions.filterNot { it.id in groupIds })
+    if (previewRegionId in groupIds) {
         previewRegionId = null
     }
-    if (magicSelectionPreview?.regionId == regionId) {
+    if (magicSelectionPreview?.regionId in groupIds) {
         magicSelectionPreview = null
     }
 }
 
 fun AppController.toggleVisibility(regionId: String) {
     if (regions.none { it.id == regionId }) return
-    replaceRegions("切换区域显示", regions.map { if (it.id == regionId) it.copy(visible = !it.visible) else it })
+    val groupIds = groupMemberIdsFor(regions, regionId).ifEmpty { setOf(regionId) }
+    val shouldShow = regions.any { it.id in groupIds && !it.visible }
+    replaceRegions(
+        "切换区域显示",
+        regions.map { if (it.id in groupIds) it.copy(visible = shouldShow) else it }
+    )
 }

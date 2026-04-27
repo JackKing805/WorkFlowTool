@@ -140,14 +140,14 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
                     strings.text(StringKey.AutoMode),
                     { controller.rebuildFromAutoAsync(logResult = true) },
                     active = controller.splitSource == io.github.workflowtool.model.SplitSource.AutoDetect,
-                    enabled = controller.isNativeSplitAvailable,
+                    enabled = controller.isAutoDetectAvailable,
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
                 GhostButton(
                     strings.text(StringKey.GridMode),
                     { controller.rebuildFromSmartGridAsync(logResult = true) },
                     active = controller.splitSource == io.github.workflowtool.model.SplitSource.SmartGrid,
-                    enabled = controller.isNativeSplitAvailable,
+                    enabled = controller.isGridSplitAvailable,
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
             }
@@ -156,6 +156,7 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             StatusLine(strings.text(StringKey.ManualEditsActive), controller.manualStatusLabel)
             StatusLine(strings.text(StringKey.DetectionMode), controller.detectionModeLabel)
             StatusLine(strings.text(StringKey.DetectionBackend), controller.detectionBackendLabel, multilineValue = true)
+            BackendWarning(controller)
             StatusLine(strings.text(StringKey.DetectionTime), controller.detectionTimeLabel)
             StatusLine(strings.text(StringKey.CandidatePixels), controller.candidatePixelsLabel)
             StatusLine(strings.text(StringKey.BackgroundEstimate), controller.backgroundEstimateLabel)
@@ -187,14 +188,10 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             GhostButton(
                 strings.text(StringKey.Regenerate),
                 controller::regenerateBaseAsync,
-                enabled = controller.isNativeSplitAvailable,
+                enabled = controller.canRegenerateBase,
                 modifier = Modifier.fillMaxWidth().height(38.dp)
             )
             Spacer(Modifier.height(12.dp))
-            if (!controller.isNativeSplitAvailable) {
-                Text("C++ 检测后端当前不可用，自动识别和网格拆分会被禁用。", color = Danger, fontSize = 12.sp)
-                Spacer(Modifier.height(10.dp))
-            }
             Text(strings.text(StringKey.ManualAdjustments), color = Color.White, fontSize = 13.sp)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -208,6 +205,7 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
                     strings.text(StringKey.MagicTool),
                     controller::enterMagicSelectionMode,
                     active = controller.toolMode == ToolMode.Magic,
+                    enabled = controller.isGridSplitAvailable,
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
                 GhostButton(
@@ -280,6 +278,31 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
 }
 
 @Composable
+private fun BackendWarning(controller: AppController) {
+    if (controller.isAutoDetectAvailable && controller.isGridSplitAvailable) return
+    val unavailableFeatures = buildList {
+        if (!controller.isAutoDetectAvailable) add("自动识别")
+        if (!controller.isGridSplitAvailable) add("智能网格")
+        if (!controller.isGridSplitAvailable) add("魔棒")
+    }.joinToString("、")
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(7.dp))
+            .background(Color(0xFF2A171A))
+            .border(1.dp, Color(0xFF7A2F39), RoundedCornerShape(7.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text("检测后端不可用", color = Danger, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "当前受影响：$unavailableFeatures。详细原因见上方“${controller.localization.text(StringKey.DetectionBackend)}”。",
+            color = Color(0xFFFFC2CB),
+            fontSize = 12.sp
+        )
+    }
+}
+
+@Composable
 fun GridControls(config: GridConfig, onChange: (GridConfig) -> Unit, strings: LocalizationProvider) {
     Text(strings.text(StringKey.SmartGridSettings), color = Color.White, fontSize = 13.sp)
     Spacer(Modifier.height(8.dp))
@@ -292,4 +315,3 @@ fun GridControls(config: GridConfig, onChange: (GridConfig) -> Unit, strings: Lo
     SmallCheck(strings.text(StringKey.TrimCellToContent), config.trimCellToContent) { onChange(config.copy(trimCellToContent = it)) }
     SmallCheck(strings.text(StringKey.IgnoreEmptyCells), config.ignoreEmptyCells) { onChange(config.copy(ignoreEmptyCells = it)) }
 }
-
