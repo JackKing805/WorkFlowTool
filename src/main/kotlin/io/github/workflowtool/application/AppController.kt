@@ -219,8 +219,14 @@ class AppController(
             .forEach { status ->
                 log("${status.name} 缺失：${status.detail}")
             }
+        val pythonRuntimeReady = report.statuses
+            .filter { it.name == "Python venv" || it.name == "runtime model" }
+            .all { it.ok }
         if (report.statuses.all { it.ok }) {
             log("离线运行依赖已就绪")
+        }
+        if (pythonRuntimeReady) {
+            preparePythonRuntimeAsync()
         } else if (persistenceEnabled && report.needsPythonRuntimePreparation) {
             preparePythonRuntimeAsync()
         }

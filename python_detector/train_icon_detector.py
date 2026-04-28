@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -13,6 +14,14 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from offline_common import canonicalize_record, read_jsonl
+
+
+def configure_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 class TinyIconSegmentation(nn.Module):
@@ -71,6 +80,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    configure_stdio()
     args = parse_args()
     root = Path(__file__).resolve().parent
     dataset_root = resolve_under(root, args.dataset)

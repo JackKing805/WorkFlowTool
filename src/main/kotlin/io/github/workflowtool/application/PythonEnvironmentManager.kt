@@ -5,7 +5,7 @@ import java.nio.file.Path
 import kotlin.io.path.exists
 
 internal object PythonEnvironmentManager {
-    private val requiredModules = listOf("torch", "torchvision", "onnxruntime", "numpy", "PIL")
+    private val requiredModules = listOf("torch", "torchvision", "onnx", "onnxscript", "onnxruntime", "numpy", "PIL")
     private val modelDir: Path
         get() = AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation")
     private val modelFile: Path get() = modelDir.resolve("model.onnx")

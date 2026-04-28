@@ -196,7 +196,7 @@ fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
                         }
                 ) {
                     drawRect(Color(0xFF10151D), size = size)
-                    drawCheckerboard(size)
+                    drawCheckerboard(size, zoom, viewportOffset)
                     drawImage(
                         image = bitmap,
                         dstOffset = IntOffset(viewportOffset.x.roundToInt(), viewportOffset.y.roundToInt()),

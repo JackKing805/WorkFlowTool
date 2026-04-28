@@ -97,19 +97,30 @@ internal object AppRuntimeFiles {
         val libraryName = nativeLibraryName()
         val target = appDataRoot.resolve("native").resolve(libraryName)
         return copyResource("native/$libraryName", target, overwrite = true)
+            ?: copyNativeBuildOutput(libraryName, target)
+    }
+
+    private fun copyNativeBuildOutput(libraryName: String, target: Path): File? {
+        val candidates = listOf(
+            projectRoot.resolve("native").resolve("cpp_detector").resolve("build").resolve("release").resolve(libraryName),
+            projectRoot.resolve("native").resolve("cpp_detector").resolve("build").resolve("release").resolve("Release").resolve(libraryName),
+            projectRoot.resolve("native").resolve(libraryName)
+        )
+        val source = candidates.firstOrNull { it.exists() } ?: return null
+        Files.createDirectories(target.parent)
+        return copyFileIfChanged(source, target) ?: existingTargetOrNull(target)
     }
 
     private fun copyResource(resourcePath: String, target: Path, overwrite: Boolean): File? {
         val stream = AppRuntimeFiles::class.java.classLoader.getResourceAsStream(resourcePath)
         Files.createDirectories(target.parent)
         if (stream != null) {
-            if (overwrite || !target.exists()) {
-                stream.use {
-                    Files.copy(it, target, StandardCopyOption.REPLACE_EXISTING)
+            stream.use { input ->
+                if (overwrite || !target.exists()) {
+                    val bytes = input.readBytes()
+                    copyBytesIfChanged(bytes, target) ?: return existingTargetOrNull(target)
+                    applyExecutableBit(target)
                 }
-                applyExecutableBit(target)
-            } else {
-                stream.close()
             }
             return target.toFile()
         }
@@ -117,10 +128,34 @@ internal object AppRuntimeFiles {
         val projectFile = Path(System.getProperty("user.dir")).resolve(resourcePath)
         if (!projectFile.exists()) return null
         if (overwrite || !target.exists()) {
-            Files.copy(projectFile, target, StandardCopyOption.REPLACE_EXISTING)
+            copyFileIfChanged(projectFile, target) ?: return existingTargetOrNull(target)
             applyExecutableBit(target)
         }
         return target.toFile()
+    }
+
+    private fun copyBytesIfChanged(bytes: ByteArray, target: Path): File? {
+        if (target.exists() && runCatching { Files.readAllBytes(target).contentEquals(bytes) }.getOrDefault(false)) {
+            return target.toFile()
+        }
+        return runCatching {
+            Files.write(target, bytes)
+            target.toFile()
+        }.getOrNull()
+    }
+
+    private fun copyFileIfChanged(source: Path, target: Path): File? {
+        if (target.exists() && runCatching { Files.mismatch(source, target) == -1L }.getOrDefault(false)) {
+            return target.toFile()
+        }
+        return runCatching {
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+            target.toFile()
+        }.getOrNull()
+    }
+
+    private fun existingTargetOrNull(target: Path): File? {
+        return if (target.exists()) target.toFile() else null
     }
 
     private fun applyExecutableBit(target: Path) {

@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.hasMask
+import kotlin.math.floor
 import kotlin.math.max
 
 internal data class RegionOverlayStyle(
@@ -19,16 +20,18 @@ internal data class RegionOverlayStyle(
     val strokeWidth: Float
 )
 
-fun DrawScope.drawCheckerboard(size: Size) {
-    val cell = 16f
-    var y = 0f
-    var row = 0
+fun DrawScope.drawCheckerboard(size: Size, zoom: Float = 1f, viewportOffset: Offset = Offset.Zero) {
+    val cell = (12f * zoom.coerceIn(0.5f, 4f)).coerceIn(8f, 42f)
+    val startX = floor(-viewportOffset.x / cell) * cell + viewportOffset.x
+    val startY = floor(-viewportOffset.y / cell) * cell + viewportOffset.y
+    var y = startY
+    var row = floor((y - viewportOffset.y) / cell).toInt()
     while (y < size.height) {
-        var x = 0f
-        var column = 0
+        var x = startX
+        var column = floor((x - viewportOffset.x) / cell).toInt()
         while (x < size.width) {
             drawRect(
-                color = if ((row + column) % 2 == 0) Color(0xFF1E232B) else Color(0xFF252B34),
+                color = if ((row + column) % 2 == 0) Color(0xFFBFC4CC) else Color(0xFFE1E4E8),
                 topLeft = Offset(x, y),
                 size = Size(cell, cell)
             )
@@ -37,6 +40,26 @@ fun DrawScope.drawCheckerboard(size: Size) {
         }
         y += cell
         row += 1
+    }
+    drawPixelGrid(size, zoom, viewportOffset)
+}
+
+private fun DrawScope.drawPixelGrid(size: Size, zoom: Float, viewportOffset: Offset) {
+    if (zoom < 3f) return
+    val spacing = zoom
+    val alpha = ((zoom - 3f) / 5f).coerceIn(0.10f, 0.26f)
+    val color = Color.Black.copy(alpha = alpha)
+    var x = viewportOffset.x % spacing
+    if (x > 0f) x -= spacing
+    while (x <= size.width) {
+        drawLine(color, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
+        x += spacing
+    }
+    var y = viewportOffset.y % spacing
+    if (y > 0f) y -= spacing
+    while (y <= size.height) {
+        drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
+        y += spacing
     }
 }
 

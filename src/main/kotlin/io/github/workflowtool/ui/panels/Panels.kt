@@ -278,11 +278,7 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
 
 @Composable
 private fun BackendWarning(controller: AppController) {
-    if (controller.isAutoDetectAvailable && controller.isGridSplitAvailable) return
-    val unavailableFeatures = buildList {
-        if (!controller.isAutoDetectAvailable) add("自动识别")
-        if (!controller.isGridSplitAvailable) add("智能网格")
-    }.joinToString("、")
+    if (controller.isAutoDetectAvailable) return
     Column(
         Modifier.fillMaxWidth()
             .clip(RoundedCornerShape(7.dp))
@@ -290,10 +286,10 @@ private fun BackendWarning(controller: AppController) {
             .border(1.dp, Color(0xFF7A2F39), RoundedCornerShape(7.dp))
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
-        Text("检测后端不可用", color = Danger, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text("自动识别后端不可用", color = Danger, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "当前受影响：$unavailableFeatures。详细原因见上方“${controller.localization.text(StringKey.DetectionBackend)}”。",
+            "Python 识别后端未就绪。详细原因见上方“${controller.localization.text(StringKey.DetectionBackend)}”。",
             color = Color(0xFFFFC2CB),
             fontSize = 12.sp
         )

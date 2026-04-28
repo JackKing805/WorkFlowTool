@@ -55,6 +55,8 @@ internal object PythonRuntime {
     fun configureProcess(builder: ProcessBuilder): ProcessBuilder {
         val env = builder.environment()
         env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         env.remove("PIP_NO_INDEX")
         env.remove("WORKFLOWTOOL_OFFLINE")
         env.remove("WORKFLOWTOOL_DISABLE_NETWORK")

@@ -60,6 +60,11 @@
       "license": "Apache-2.0"
     },
     {
+      "name": "ONNX Script",
+      "package": "onnxscript",
+      "license": "Apache-2.0"
+    },
+    {
       "name": "ONNX Runtime",
       "package": "onnxruntime",
       "license": "MIT"

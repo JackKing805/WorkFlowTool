@@ -342,8 +342,8 @@ fun EditorCanvas(
                     )
                 }
         ) {
-            drawRect(Color(0xFF14181E), size = size)
-            drawCheckerboard(size)
+            drawRect(Color(0xFFE1E4E8), size = size)
+            drawCheckerboard(size, zoom, viewportOffset)
             if (showGrid) drawGrid(size, zoom, viewportOffset)
             bitmap?.let {
                 drawImage(

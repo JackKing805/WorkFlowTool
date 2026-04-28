@@ -13,7 +13,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Text
@@ -25,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import io.github.workflowtool.application.AppController
@@ -178,27 +181,39 @@ private fun RuntimeStatusBar(controller: AppController) {
         Modifier.fillMaxWidth()
             .background(ControlBg, RoundedCornerShape(4.dp))
             .border(1.dp, Border, RoundedCornerShape(4.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        horizontalArrangement = Arrangement.spacedBy(9.dp)
     ) {
-        Box(Modifier.width(8.dp).height(8.dp).background(color, RoundedCornerShape(8.dp)))
-        Text(
-            controller.runtimeStatusLabel,
-            color = Color.White,
-            fontSize = 12.sp,
-            maxLines = 1,
-            modifier = Modifier.weight(1f)
-        )
+        Box(Modifier.size(8.dp).background(color, RoundedCornerShape(8.dp)))
+        Column(Modifier.weight(1f)) {
+            Text(
+                controller.runtimeStatusLabel,
+                color = Color.White,
+                fontSize = 12.sp,
+                lineHeight = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (!isFailed) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    controller.detectionBackendLabel,
+                    color = TextDim,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
         if (isFailed) {
             GhostButton(
                 "重试",
                 controller::preparePythonRuntimeAsync,
-                modifier = Modifier.width(58.dp).height(28.dp),
+                modifier = Modifier.width(58.dp).height(30.dp),
                 enabled = !controller.isBusy
             )
-        } else {
-            Text(controller.detectionBackendLabel, color = TextDim, fontSize = 12.sp, maxLines = 1)
         }
     }
 }
@@ -227,9 +242,26 @@ private fun LoadingOverlay(message: String) {
 
 @Composable
 private fun PreviewStatusBar(controller: AppController) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-        Text("缩放 ${kotlin.math.round(controller.zoom * 100)}%", color = TextMuted, fontSize = 12.sp)
-        Text("坐标 ${controller.hoverPositionLabel}", color = TextMuted, fontSize = 12.sp)
-        Text("选区 ${controller.selectedRegionLabel}", color = TextMuted, fontSize = 12.sp)
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        PreviewStatusText("缩放 ${kotlin.math.round(controller.zoom * 100)}%", Modifier.widthIn(min = 72.dp, max = 96.dp))
+        PreviewStatusText("坐标 ${controller.hoverPositionLabel}", Modifier.weight(1f))
+        PreviewStatusText("选区 ${controller.selectedRegionLabel}", Modifier.weight(1f))
     }
+}
+
+@Composable
+private fun PreviewStatusText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        color = TextMuted,
+        fontSize = 12.sp,
+        lineHeight = 15.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+    )
 }
