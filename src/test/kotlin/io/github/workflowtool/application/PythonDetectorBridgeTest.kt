@@ -44,6 +44,7 @@ class PythonDetectorBridgeTest {
         val region = result.regions.first()
         assertTrue(region.hasMask())
         assertEquals(4, region.alphaMask.size)
+        assertTrue(region.alphaMask.count { it > 0 } < region.width * region.height)
         assertEquals(0.875f, region.score)
         assertEquals(128, result.stats.candidatePixels)
         assertEquals("mask_rcnn_onnx", result.stats.backend)

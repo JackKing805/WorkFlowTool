@@ -39,6 +39,7 @@ import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDropEvent
 import java.io.File
 
+//TODO 优化预览区，目前预览区导入图片后拖动会有明显卡顿，点击选框也会卡顿，优化性能
 fun main() {
     installClipboardExceptionGuard()
     FileKit.init(appId = "io.github.workflowtool")

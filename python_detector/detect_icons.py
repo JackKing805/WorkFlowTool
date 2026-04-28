@@ -32,18 +32,22 @@ def main() -> int:
     mask_threshold = float(metadata.get("maskThreshold", args.mask_threshold))
 
     image = Image.open(image_path).convert("RGBA")
-    image_array = np.asarray(image, dtype=np.float32).transpose(2, 0, 1)[None, :, :, :] / 255.0
+    source_array = np.asarray(image, dtype=np.float32)
+    source_height, source_width = source_array.shape[:2]
+    image_array = pad_to_multiple(source_array, 4).transpose(2, 0, 1)[None, :, :, :] / 255.0
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
     logits = session.run(None, {input_name: image_array})[0]
     probabilities = 1.0 / (1.0 + np.exp(-np.asarray(logits[0, 0], dtype=np.float32)))
+    probabilities = probabilities[:source_height, :source_width]
     mask = probabilities >= mask_threshold
+    image_pixels = np.asarray(image, dtype=np.uint8)
+    background = estimate_edge_background(image_pixels)
     components = extract_components(mask)
     regions = [
         region
         for component in components
-        for region in [component_to_region(component, probabilities, score_threshold)]
-        if region is not None
+        for region in component_to_regions(component, probabilities, image_pixels, background, score_threshold)
     ]
     regions.sort(key=lambda region: (region["bbox"]["y"], region["bbox"]["x"]))
     total_time_ms = int(round((time.perf_counter() - started_at) * 1000.0))
@@ -87,6 +91,21 @@ def load_metadata(model_path: Path) -> Dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def pad_to_multiple(array: np.ndarray, multiple: int) -> np.ndarray:
+    height, width = array.shape[:2]
+    next_height = ((height + multiple - 1) // multiple) * multiple
+    next_width = ((width + multiple - 1) // multiple) * multiple
+    if next_height == height and next_width == width:
+        return array
+    padded = np.zeros((next_height, next_width, array.shape[2]), dtype=array.dtype)
+    padded[:height, :width, :] = array
+    if next_height > height:
+        padded[height:, :width, :] = array[height - 1 : height, :, :]
+    if next_width > width:
+        padded[:, width:, :] = padded[:, width - 1 : width, :]
+    return padded
+
+
 def extract_components(mask: np.ndarray) -> List[List[Tuple[int, int]]]:
     height, width = mask.shape
     visited = np.zeros(mask.shape, dtype=np.bool_)
@@ -109,13 +128,15 @@ def extract_components(mask: np.ndarray) -> List[List[Tuple[int, int]]]:
     return components
 
 
-def component_to_region(
+def component_to_regions(
     coords: Sequence[Tuple[int, int]],
     probabilities: np.ndarray,
+    image_pixels: np.ndarray,
+    background: Tuple[int, int, int, int],
     score_threshold: float,
-) -> Dict[str, object] | None:
+) -> List[Dict[str, object]]:
     if len(coords) < 12:
-        return None
+        return []
     xs = [coord[0] for coord in coords]
     ys = [coord[1] for coord in coords]
     left = min(xs)
@@ -125,20 +146,36 @@ def component_to_region(
     width = right - left
     height = bottom - top
     if width <= 1 or height <= 1:
-        return None
+        return []
     score = float(np.mean([probabilities[y, x] for x, y in coords]))
     if score < score_threshold:
-        return None
-    alpha = np.zeros((height, width), dtype=np.uint8)
+        return []
+    component_mask = np.zeros((height, width), dtype=np.bool_)
     for x, y in coords:
-        alpha[y - top, x - left] = int(round(float(probabilities[y, x]) * 255.0))
-    return {
-        "bbox": {"x": left, "y": top, "width": width, "height": height},
-        "maskWidth": width,
-        "maskHeight": height,
-        "alphaMask": alpha.reshape(-1).astype(int).tolist(),
-        "score": round(score, 4),
-    }
+        component_mask[y - top, x - left] = True
+    alpha = refine_alpha_mask(component_mask, probabilities[top:bottom, left:right], image_pixels[top:bottom, left:right], background)
+    regions: List[Dict[str, object]] = []
+    for local_component in extract_components(alpha > 0):
+        local_alpha = np.zeros(alpha.shape, dtype=np.uint8)
+        for x, y in local_component:
+            local_alpha[y, x] = alpha[y, x]
+        trimmed = trim_alpha_mask(local_alpha)
+        if trimmed is None:
+            continue
+        trim_left, trim_top, region_alpha = trimmed
+        region_height, region_width = region_alpha.shape
+        if int((region_alpha > 0).sum()) < 12:
+            continue
+        regions.append(
+            {
+                "bbox": {"x": left + trim_left, "y": top + trim_top, "width": region_width, "height": region_height},
+                "maskWidth": region_width,
+                "maskHeight": region_height,
+                "alphaMask": region_alpha.reshape(-1).astype(int).tolist(),
+                "score": round(score, 4),
+            }
+        )
+    return regions
 
 
 def neighbors4(x: int, y: int, width: int, height: int) -> Iterable[Tuple[int, int]]:
@@ -150,6 +187,71 @@ def neighbors4(x: int, y: int, width: int, height: int) -> Iterable[Tuple[int, i
         yield x, y - 1
     if y + 1 < height:
         yield x, y + 1
+
+
+def refine_alpha_mask(
+    component_mask: np.ndarray,
+    probabilities: np.ndarray,
+    pixels: np.ndarray,
+    background: Tuple[int, int, int, int],
+) -> np.ndarray:
+    alpha_channel = pixels[:, :, 3].astype(np.int16)
+    transparent_foreground = alpha_channel > 8
+    has_transparency = float((alpha_channel <= 8).sum()) / float(alpha_channel.size) >= 0.10
+    if has_transparency:
+        foreground = transparent_foreground
+    else:
+        distances = color_distance(pixels, background)
+        foreground = distances > 22.0
+    refined = component_mask & foreground
+    if refined.sum() < max(8, int(component_mask.sum() * 0.08)):
+        refined = component_mask
+    alpha = np.zeros(component_mask.shape, dtype=np.uint8)
+    soft = np.clip(probabilities * 255.0, 0, 255).astype(np.uint8)
+    alpha[refined] = np.maximum(soft[refined], 180)
+    return alpha
+
+
+def trim_alpha_mask(alpha: np.ndarray) -> Tuple[int, int, np.ndarray] | None:
+    ys, xs = np.nonzero(alpha > 0)
+    if xs.size == 0 or ys.size == 0:
+        return None
+    left = int(xs.min())
+    top = int(ys.min())
+    right = int(xs.max()) + 1
+    bottom = int(ys.max()) + 1
+    return left, top, alpha[top:bottom, left:right]
+
+
+def estimate_edge_background(pixels: np.ndarray) -> Tuple[int, int, int, int]:
+    height, width, _ = pixels.shape
+    edge = max(1, min(3, width, height))
+    samples = np.concatenate(
+        [
+            pixels[:edge, :, :].reshape(-1, 4),
+            pixels[height - edge :, :, :].reshape(-1, 4),
+            pixels[:, :edge, :].reshape(-1, 4),
+            pixels[:, width - edge :, :].reshape(-1, 4),
+        ],
+        axis=0,
+    )
+    if samples.size == 0:
+        return (0, 0, 0, 0)
+    opaque = samples[samples[:, 3] > 8]
+    source = opaque if len(opaque) else samples
+    buckets = (source.astype(np.uint16) // np.array([16, 16, 16, 32], dtype=np.uint16)).astype(np.uint16)
+    keys, counts = np.unique(buckets, axis=0, return_counts=True)
+    dominant_bucket = keys[int(np.argmax(counts))]
+    dominant = source[np.all(buckets == dominant_bucket, axis=1)]
+    mean = np.rint(dominant.mean(axis=0)).astype(np.uint8)
+    return int(mean[0]), int(mean[1]), int(mean[2]), int(mean[3])
+
+
+def color_distance(pixels: np.ndarray, background: Tuple[int, int, int, int]) -> np.ndarray:
+    bg = np.asarray(background, dtype=np.int16)
+    values = pixels.astype(np.int16)
+    diff = np.abs(values - bg)
+    return diff[:, :, 0] * 0.35 + diff[:, :, 1] * 0.50 + diff[:, :, 2] * 0.15 + diff[:, :, 3] * 0.45
 
 
 if __name__ == "__main__":

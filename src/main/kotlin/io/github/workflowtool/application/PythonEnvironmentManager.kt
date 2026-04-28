@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.io.path.exists
 
 internal object PythonEnvironmentManager {
+    private const val RequiredModelArchitecture = "light_unet_icon_segmentation_v2"
     private val requiredModules = listOf("torch", "torchvision", "onnx", "onnxscript", "onnxruntime", "numpy", "PIL")
     private val modelDir: Path
         get() = AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation")
@@ -72,7 +73,7 @@ internal object PythonEnvironmentManager {
     }
 
     private fun ensureModel(onStage: (RuntimePreparationStage) -> Unit): EnvironmentStatus {
-        if (modelFile.exists() && metadataFile.exists()) {
+        if (modelFile.exists() && metadataFile.exists() && modelArchitectureIsCurrent()) {
             return EnvironmentStatus(true, "model ready: $modelFile")
         }
         Files.createDirectories(modelDir)
@@ -99,7 +100,7 @@ internal object PythonEnvironmentManager {
                 "--out",
                 "model/instance_segmentation",
                 "--epochs",
-                System.getenv("WORKFLOWTOOL_TRAIN_EPOCHS")?.takeIf { it.isNotBlank() } ?: "2"
+                System.getenv("WORKFLOWTOOL_TRAIN_EPOCHS")?.takeIf { it.isNotBlank() } ?: "8"
             )
         ) ?: return EnvironmentStatus(false, "venv python unavailable for model training")
         return runProcess(train, AppRuntimeFiles.pythonDir, "train first-run icon model")
@@ -125,6 +126,15 @@ internal object PythonEnvironmentManager {
         return runCatching {
             Files.readAllLines(path, Charsets.UTF_8).count { it.isNotBlank() }
         }.getOrDefault(0)
+    }
+
+    private fun modelArchitectureIsCurrent(): Boolean {
+        if (!metadataFile.exists()) return false
+        return runCatching {
+            parseJsonObject(Files.readString(metadataFile, Charsets.UTF_8))
+                ?.get("architecture")
+                ?.asString() == RequiredModelArchitecture
+        }.getOrDefault(false)
     }
 
     private fun runProcess(
