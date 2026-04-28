@@ -19,16 +19,15 @@
 
 - Python 依赖只允许本地 wheel 安装，统一放到仓库内 third_party/wheels/<platform>/。
 - 项目内置本地 Python 运行时，放到 third_party/python/<platform>/。
-- ONNX Runtime、本地模型、C++ 依赖头文件/静态资源都放到项目目录下。
+- 本地模型、C++ 依赖头文件/静态资源都放到项目目录下。
 - 安装脚本只做“从项目目录解压/安装到项目目录”，不做在线下载。
 - PythonRuntime 改为优先且默认只使用项目内 Python，不再探测系统 python/python3。
 
 ### 2. Python 模型链路
 
 - 训练、导出、推理全部离线执行。
-- 主模型采用本地实例分割方案，训练后导出为本地 ONNX。
+- 主模型采用本地实例分割方案，训练后导出为本地参数文件。
 - 推理仅依赖本地：
-    - onnxruntime
     - numpy
     - Pillow
     - 必要时少量本地图像处理库
@@ -54,7 +53,7 @@
 - C++ 只使用标准库和宽松许可本地库。
 - 保留传统检测兜底，同时扩展原生 ABI 支持不定长点位数组。
 - C++ 增加本地轮廓提取、多边形压缩、bbox 同步计算。
-- 首轮不要求 C++ 跑主模型，但若后续启用，也只能接本地 ONNX Runtime，不能接任何联网 SDK。
+- 首轮不要求 C++ 跑主模型，也不能接任何联网 SDK。
 
 ### 5. Kotlin / 桌面集成
 
@@ -76,8 +75,6 @@
 - Python：PSF
 - PyTorch：BSD-3-Clause，仅用于本地训练
 - torchvision：BSD-3-Clause，仅用于本地训练
-- onnx：Apache-2.0
-- onnxruntime：MIT
 - numpy：BSD-3-Clause
 - Pillow：宽松许可
 - 可选 pycocotools：BSD
@@ -92,7 +89,6 @@
 ### C++
 
 - C++ 标准库
-- 可选 ONNX Runtime C/C++ API：MIT
 - 可选 stb_image / stb_image_write：MIT/Public Domain
 - 可选 nlohmann/json：MIT
 
@@ -116,7 +112,7 @@
 - 依赖测试：
     - 项目内 Python 能独立创建本地环境
     - 本地 wheel 安装成功
-    - 本地 ONNX Runtime 和模型可直接加载
+    - 本地模型可直接加载
 - 功能测试：
     - 输出 bbox + 不定长 points
     - 无模型时能回退到本地 C++/启发式检测
@@ -132,4 +128,3 @@
 - 若某个库虽免费可商用，但其标准使用方式强依赖联网，则不纳入方案。
 - 若某个模型权重许可不清或需要在线获取，则直接排除。
 - 最终交付将附带一份离线依赖清单和许可证清单，作为商用分发依据。
-

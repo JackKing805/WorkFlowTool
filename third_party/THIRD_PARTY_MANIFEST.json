@@ -1,18 +1,87 @@
 {
-  "version": 1,
+  "version": 2,
   "generatedBy": "manual",
-  "notes": [
-    "该清单用于记录离线运行时、wheel、模型和许可证来源。",
-    "实际分发时请补全文件哈希、版本号和许可证文本。"
+  "policy": {
+    "commercialUseRequired": true,
+    "pythonDependenciesInstalledFrom": "PyPI",
+    "pretrainedModelsBundled": false,
+    "disallowLicenses": [
+      "GPL",
+      "AGPL",
+      "non-commercial",
+      "research-only",
+      "license-unknown"
+    ]
+  },
+  "applicationLibraries": [
+    {
+      "name": "Compose Desktop",
+      "artifact": "org.jetbrains.compose.desktop:desktop-jvm:1.10.3",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "FileKit Core",
+      "artifact": "io.github.vinceglb:filekit-core-jvm:0.13.0",
+      "license": "MIT"
+    },
+    {
+      "name": "FileKit Dialogs",
+      "artifact": "io.github.vinceglb:filekit-dialogs-jvm:0.13.0",
+      "license": "MIT"
+    },
+    {
+      "name": "JNA",
+      "artifact": "net.java.dev.jna:jna:5.14.0",
+      "license": "Apache-2.0",
+      "declaredLicenses": [
+        "LGPL-2.1-or-later",
+        "Apache-2.0"
+      ]
+    }
   ],
-  "pythonRuntime": [],
-  "wheels": [],
-  "nativeLibraries": [],
+  "pythonDependencies": [
+    {
+      "name": "Python",
+      "license": "PSF-2.0"
+    },
+    {
+      "name": "PyTorch",
+      "package": "torch",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "torchvision",
+      "package": "torchvision",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "ONNX",
+      "package": "onnx",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "ONNX Runtime",
+      "package": "onnxruntime",
+      "license": "MIT"
+    },
+    {
+      "name": "NumPy",
+      "package": "numpy",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "Pillow",
+      "package": "Pillow",
+      "license": "HPND"
+    }
+  ],
   "models": [
     {
-      "name": "workflowtool-offline-polygon-heuristic",
-      "path": "python_detector/model/combined/model.json",
-      "license": "Project-local metadata"
+      "name": "runtime-trained-icon-segmentation",
+      "path": "runtime/python_detector/model/instance_segmentation/model.onnx",
+      "license": "Generated locally from project/user training data",
+      "pretrained": false,
+      "bundled": false
     }
   ]
 }

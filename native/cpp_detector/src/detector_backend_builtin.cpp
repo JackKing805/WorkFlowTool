@@ -60,6 +60,7 @@ struct RegionModel {
     int height = 0;
     float score = 0.0f;
     std::vector<NativePoint> points;
+    std::vector<std::vector<NativePoint>> holes;
 };
 
 struct BucketStats {
@@ -374,17 +375,69 @@ bool is_collinear(const NativePoint& previous, const NativePoint& current, const
     return std::abs(leftX * rightY - leftY * rightX) <= tolerance;
 }
 
-std::vector<NativePoint> simplify_polygon(std::vector<NativePoint> points, int tolerance) {
-    if (points.size() <= 4U || tolerance <= 0) return points;
-    std::vector<NativePoint> simplified;
-    simplified.reserve(points.size());
-    simplified.push_back(points.front());
-    for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-        if (is_collinear(simplified.back(), points[index], points[index + 1], tolerance)) continue;
-        simplified.push_back(points[index]);
+float point_segment_distance_squared(const NativePoint& point, const NativePoint& start, const NativePoint& end) {
+    const float dx = static_cast<float>(end.x - start.x);
+    const float dy = static_cast<float>(end.y - start.y);
+    const float lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 0.0f) {
+        const float px = static_cast<float>(point.x - start.x);
+        const float py = static_cast<float>(point.y - start.y);
+        return px * px + py * py;
     }
-    simplified.push_back(points.back());
-    return dedupe_adjacent(std::move(simplified));
+    const float t = std::clamp(
+        (static_cast<float>(point.x - start.x) * dx + static_cast<float>(point.y - start.y) * dy) / lengthSquared,
+        0.0f,
+        1.0f
+    );
+    const float projectionX = static_cast<float>(start.x) + t * dx;
+    const float projectionY = static_cast<float>(start.y) + t * dy;
+    const float px = static_cast<float>(point.x) - projectionX;
+    const float py = static_cast<float>(point.y) - projectionY;
+    return px * px + py * py;
+}
+
+void simplify_rdp_range(
+    const std::vector<NativePoint>& points,
+    std::size_t first,
+    std::size_t last,
+    float toleranceSquared,
+    std::vector<std::uint8_t>& keep
+) {
+    if (last <= first + 1U) return;
+    float bestDistance = -1.0f;
+    std::size_t bestIndex = first;
+    for (std::size_t index = first + 1U; index < last; ++index) {
+        const float distance = point_segment_distance_squared(points[index], points[first], points[last]);
+        if (distance > bestDistance) {
+            bestDistance = distance;
+            bestIndex = index;
+        }
+    }
+    if (bestDistance <= toleranceSquared) return;
+    keep[bestIndex] = 1U;
+    simplify_rdp_range(points, first, bestIndex, toleranceSquared, keep);
+    simplify_rdp_range(points, bestIndex, last, toleranceSquared, keep);
+}
+
+std::vector<NativePoint> simplify_polygon_rdp(std::vector<NativePoint> points, float tolerance) {
+    points = dedupe_adjacent(std::move(points));
+    if (points.size() <= 4U || tolerance <= 0.0f) return points;
+    std::vector<NativePoint> closed = points;
+    closed.push_back(points.front());
+    std::vector<std::uint8_t> keep(closed.size(), 0U);
+    keep.front() = 1U;
+    keep.back() = 1U;
+    simplify_rdp_range(closed, 0U, closed.size() - 1U, tolerance * tolerance, keep);
+    std::vector<NativePoint> output;
+    output.reserve(points.size());
+    for (std::size_t index = 0; index + 1U < closed.size(); ++index) {
+        if (keep[index] != 0U) output.push_back(closed[index]);
+    }
+    return dedupe_adjacent(std::move(output));
+}
+
+std::vector<NativePoint> simplify_polygon(std::vector<NativePoint> points, int tolerance) {
+    return simplify_polygon_rdp(std::move(points), static_cast<float>(std::clamp(tolerance, 1, 3)));
 }
 
 std::vector<NativePoint> rect_points(int x, int y, int width, int height) {
@@ -491,6 +544,8 @@ RegionModel merge_region_models(const RegionModel& left, const RegionModel& righ
     } else {
         recompute_bbox_from_points(merged);
     }
+    merged.holes = left.holes;
+    merged.holes.insert(merged.holes.end(), right.holes.begin(), right.holes.end());
     return merged;
 }
 
@@ -525,6 +580,27 @@ void assign_region_points(NativeRegion& target, const std::vector<NativePoint>& 
     target.points = allocated;
 }
 
+void assign_region_holes(NativeRegion& target, const std::vector<std::vector<NativePoint>>& holes) {
+    target.holeCount = static_cast<int>(holes.size());
+    if (holes.empty()) {
+        target.holes = nullptr;
+        return;
+    }
+    auto* allocated = new NativeContour[holes.size()];
+    for (std::size_t index = 0; index < holes.size(); ++index) {
+        allocated[index].pointCount = static_cast<int>(holes[index].size());
+        if (holes[index].empty()) {
+            allocated[index].points = nullptr;
+            continue;
+        }
+        allocated[index].points = new NativePoint[holes[index].size()];
+        for (std::size_t pointIndex = 0; pointIndex < holes[index].size(); ++pointIndex) {
+            allocated[index].points[pointIndex] = holes[index][pointIndex];
+        }
+    }
+    target.holes = allocated;
+}
+
 void populate_region(NativeRegion& target, const RegionModel& source, bool selected = false) {
     target.x = source.x;
     target.y = source.y;
@@ -534,6 +610,7 @@ void populate_region(NativeRegion& target, const RegionModel& source, bool selec
     target.selected = selected ? 1U : 0U;
     target.score = source.score;
     assign_region_points(target, source.points);
+    assign_region_holes(target, source.holes);
 }
 
 std::vector<NativePoint> outline_from_mask(const std::vector<std::uint8_t>& mask, int width, int height) {
@@ -908,6 +985,16 @@ void free_detection_result_builtin(NativeDetectionResult* result) {
             delete[] result->regions[index].points;
             result->regions[index].points = nullptr;
             result->regions[index].pointCount = 0;
+            if (result->regions[index].holes != nullptr) {
+                for (int holeIndex = 0; holeIndex < result->regions[index].holeCount; ++holeIndex) {
+                    delete[] result->regions[index].holes[holeIndex].points;
+                    result->regions[index].holes[holeIndex].points = nullptr;
+                    result->regions[index].holes[holeIndex].pointCount = 0;
+                }
+                delete[] result->regions[index].holes;
+                result->regions[index].holes = nullptr;
+            }
+            result->regions[index].holeCount = 0;
         }
         delete[] result->regions;
         result->regions = nullptr;
@@ -920,6 +1007,16 @@ void free_magic_result_builtin(NativeMagicResult* result) {
     delete[] result->region.points;
     result->region.points = nullptr;
     result->region.pointCount = 0;
+    if (result->region.holes != nullptr) {
+        for (int holeIndex = 0; holeIndex < result->region.holeCount; ++holeIndex) {
+            delete[] result->region.holes[holeIndex].points;
+            result->region.holes[holeIndex].points = nullptr;
+            result->region.holes[holeIndex].pointCount = 0;
+        }
+        delete[] result->region.holes;
+        result->region.holes = nullptr;
+    }
+    result->region.holeCount = 0;
     delete[] result->mask;
     result->mask = nullptr;
     result->maskLength = 0;

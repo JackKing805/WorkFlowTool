@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.AlertDialog
@@ -123,9 +122,6 @@ fun Toolbar(controller: AppController, canUndo: Boolean, canRedo: Boolean) {
         IconToolButton(ToolbarIcon.Draw, strings.text(StringKey.DrawRectangle), controller.toolMode == ToolMode.Draw) {
             controller.enterManualDrawMode()
         }
-        IconToolButton(ToolbarIcon.Magic, strings.text(StringKey.MagicTool), controller.toolMode == ToolMode.Magic) {
-            controller.enterMagicSelectionMode()
-        }
         IconToolButton(ToolbarIcon.Eyedropper, "吸色", controller.toolMode == ToolMode.Eyedropper) {
             controller.armBackgroundPicker()
         }
@@ -180,7 +176,6 @@ private enum class ToolbarIcon {
     Select,
     Move,
     Draw,
-    Magic,
     Eyedropper,
     Undo,
     Redo,
@@ -223,13 +218,6 @@ private fun DrawScope.drawToolbarIcon(icon: ToolbarIcon, color: Color) {
             drawLine(color, Offset(w * 0.92f, h * 0.5f), Offset(w * 0.78f, h * 0.62f), strokeWidth = 2.1f, cap = StrokeCap.Round)
         }
         ToolbarIcon.Draw -> drawRect(color, topLeft = Offset(w * 0.18f, h * 0.2f), size = Size(w * 0.64f, h * 0.58f), style = stroke)
-        ToolbarIcon.Magic -> {
-            drawLine(color, Offset(w * 0.25f, h * 0.78f), Offset(w * 0.78f, h * 0.25f), strokeWidth = 2.4f, cap = StrokeCap.Round)
-            drawCircle(color, radius = 2.2f, center = Offset(w * 0.23f, h * 0.22f))
-            drawCircle(color, radius = 1.8f, center = Offset(w * 0.72f, h * 0.76f))
-            drawLine(color, Offset(w * 0.72f, h * 0.18f), Offset(w * 0.86f, h * 0.18f), strokeWidth = 1.7f, cap = StrokeCap.Round)
-            drawLine(color, Offset(w * 0.79f, h * 0.11f), Offset(w * 0.79f, h * 0.25f), strokeWidth = 1.7f, cap = StrokeCap.Round)
-        }
         ToolbarIcon.Eyedropper -> {
             drawLine(color, Offset(w * 0.28f, h * 0.78f), Offset(w * 0.73f, h * 0.33f), strokeWidth = 3f, cap = StrokeCap.Round)
             drawLine(color, Offset(w * 0.64f, h * 0.24f), Offset(w * 0.82f, h * 0.42f), strokeWidth = 2.1f, cap = StrokeCap.Round)

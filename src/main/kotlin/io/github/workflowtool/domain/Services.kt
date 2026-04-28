@@ -69,7 +69,6 @@ enum class StringKey {
     IgnoreEmptyCells,
     TrimCellToContent,
     DrawRectangle,
-    MagicTool,
     MergeNearby,
     RemoveSmall,
     MinSize,

@@ -32,7 +32,6 @@ object DefaultLocalizationProvider : LocalizationProvider {
         StringKey.IgnoreEmptyCells to "忽略空白格",
         StringKey.TrimCellToContent to "按内容收缩单元格",
         StringKey.DrawRectangle to "绘制矩形",
-        StringKey.MagicTool to "魔棒",
         StringKey.MergeNearby to "合并相邻区域",
         StringKey.RemoveSmall to "移除小区域",
         StringKey.MinSize to "最小尺寸",

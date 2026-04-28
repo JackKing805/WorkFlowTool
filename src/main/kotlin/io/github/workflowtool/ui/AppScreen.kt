@@ -1,6 +1,7 @@
 ﻿package io.github.workflowtool.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -26,6 +28,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import io.github.workflowtool.application.AppController
+import io.github.workflowtool.application.RuntimePreparationStage
 import io.github.workflowtool.application.clearRegions
 import io.github.workflowtool.application.clearSelection
 import io.github.workflowtool.application.focusRegion
@@ -43,8 +46,10 @@ import io.github.workflowtool.domain.LayoutBounds
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.domain.WindowController
 import io.github.workflowtool.ui.components.PanelCard
+import io.github.workflowtool.ui.components.GhostButton
 import io.github.workflowtool.ui.editor.EditorCanvas
 import io.github.workflowtool.ui.panels.AdvancedSettingsDialog
+import io.github.workflowtool.ui.panels.HistoryDialog
 import io.github.workflowtool.ui.panels.LeftPanel
 import io.github.workflowtool.ui.panels.LogPanel
 import io.github.workflowtool.ui.panels.RegionPreviewDialog
@@ -54,6 +59,11 @@ import io.github.workflowtool.ui.window.HorizontalSplitter
 import io.github.workflowtool.ui.window.TopBar
 import io.github.workflowtool.ui.window.VerticalSplitter
 import io.github.workflowtool.ui.theme.TextMuted
+import io.github.workflowtool.ui.theme.TextDim
+import io.github.workflowtool.ui.theme.Border
+import io.github.workflowtool.ui.theme.ControlBg
+import io.github.workflowtool.ui.theme.Danger
+import io.github.workflowtool.ui.theme.Accent
 
 @Composable
 fun IconCropperApp(controller: AppController, windowController: WindowController) {
@@ -98,7 +108,9 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 canUndo = controller.canUndo,
                                 canRedo = controller.canRedo
                             )
-                            Spacer(Modifier.height(18.dp))
+                            Spacer(Modifier.height(10.dp))
+                            RuntimeStatusBar(controller)
+                            Spacer(Modifier.height(12.dp))
                             EditorCanvas(
                                 modifier = Modifier.fillMaxWidth().weight(1f),
                                 bitmap = bitmap,
@@ -108,7 +120,6 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 zoom = controller.zoom,
                                 viewportOffset = controller.viewportOffset,
                                 showGrid = controller.showGrid,
-                                magicPreview = controller.magicSelectionPreview,
                                 toolMode = controller.toolMode,
                                 backgroundPickArmed = controller.backgroundPickArmed,
                                 onViewport = controller::updateViewportSize,
@@ -116,8 +127,7 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 onZoom = controller::zoomAround,
                                 onCommit = controller::replaceRegions,
                                 onSelect = controller::selectRegion,
-                                onMagicSelect = controller::applyMagicSelection,
-                                onMagicExtend = controller::extendMagicSelection,
+                                onDetectInsideRegion = controller::detectInsideRegionAsync,
                                 onBackgroundPick = controller::sampleBackgroundAt,
                                 onHover = controller::updatePointerHover,
                                 onClearSelection = controller::clearSelection,
@@ -147,8 +157,49 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
     if (controller.showAdvancedSettings) {
         AdvancedSettingsDialog(controller)
     }
+    if (controller.historyDialogVisible) {
+        HistoryDialog(controller)
+    }
     controller.previewRegion?.let { region ->
         RegionPreviewDialog(controller = controller, region = region)
+    }
+}
+
+@Composable
+private fun RuntimeStatusBar(controller: AppController) {
+    val isFailed = controller.runtimePreparationFailed
+    val color = when {
+        isFailed -> Danger
+        controller.runtimePreparationStage == RuntimePreparationStage.Ready -> Accent
+        controller.isBusy -> Color(0xFFFFB84D)
+        else -> TextMuted
+    }
+    Row(
+        Modifier.fillMaxWidth()
+            .background(ControlBg, RoundedCornerShape(4.dp))
+            .border(1.dp, Border, RoundedCornerShape(4.dp))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(Modifier.width(8.dp).height(8.dp).background(color, RoundedCornerShape(8.dp)))
+        Text(
+            controller.runtimeStatusLabel,
+            color = Color.White,
+            fontSize = 12.sp,
+            maxLines = 1,
+            modifier = Modifier.weight(1f)
+        )
+        if (isFailed) {
+            GhostButton(
+                "重试",
+                controller::preparePythonRuntimeAsync,
+                modifier = Modifier.width(58.dp).height(28.dp),
+                enabled = !controller.isBusy
+            )
+        } else {
+            Text(controller.detectionBackendLabel, color = TextDim, fontSize = 12.sp, maxLines = 1)
+        }
     }
 }
 

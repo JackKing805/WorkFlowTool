@@ -59,7 +59,7 @@ class AppControllerTest {
     }
 
     @Test
-    fun selectingInnerHoleSelectsWholeContainingGroup() {
+    fun selectingContainedRegionSelectsOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -80,14 +80,14 @@ class AppControllerTest {
 
         controller.selectRegion("hole")
 
-        assertTrue(controller.regions.first { it.id == "outer" }.selected)
+        assertEquals(false, controller.regions.first { it.id == "outer" }.selected)
         assertTrue(controller.regions.first { it.id == "hole" }.selected)
         assertEquals(false, controller.regions.first { it.id == "other" }.selected)
-        assertEquals("10, 10, 40 x 40", controller.selectedRegionLabel)
+        assertEquals("20, 20, 10 x 10", controller.selectedRegionLabel)
     }
 
     @Test
-    fun togglingVisibilityOnInnerHoleTogglesWholeContainingGroup() {
+    fun togglingVisibilityOnContainedRegionTogglesOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -108,13 +108,13 @@ class AppControllerTest {
 
         controller.toggleVisibility("hole")
 
-        assertEquals(false, controller.regions.first { it.id == "outer" }.visible)
+        assertEquals(true, controller.regions.first { it.id == "outer" }.visible)
         assertEquals(false, controller.regions.first { it.id == "hole" }.visible)
         assertEquals(true, controller.regions.first { it.id == "other" }.visible)
     }
 
     @Test
-    fun removingInnerHoleRemovesWholeContainingGroup() {
+    fun removingContainedRegionRemovesOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
             splitter = CountingSplitter(),
@@ -135,7 +135,7 @@ class AppControllerTest {
 
         controller.removeRegion("hole")
 
-        assertEquals(listOf("other"), controller.regions.map { it.id })
+        assertEquals(listOf("outer", "other"), controller.regions.map { it.id })
     }
 
     @Test
@@ -204,184 +204,56 @@ class AppControllerTest {
     }
 
     @Test
-    fun magicSelectionCreatesRegionFromClickedArea() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
+    fun reopeningHistorySnapshotRestoresSavedBaseAndRegions() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val originalBase = CropRegion("auto", 3, 4, 11, 9)
+        val manual = CropRegion("manual", 18, 12, 14, 10, visible = false)
+
+        val savingController = AppController(
+            detector = StaticDetector(listOf(originalBase)),
             splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
         )
 
-        controller.loadFile(createMagicImageFile())
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
+        savingController.loadFile(file)
+        savingController.replaceRegions("manual", listOf(manual))
 
-        val selected = controller.selectedRegion
-        assertNotNull(selected)
-        assertEquals(4, selected.x)
-        assertEquals(4, selected.y)
-        assertEquals(12, selected.width)
-        assertEquals(12, selected.height)
-    }
+        val snapshotId = savingController.workspaceHistoryEntries.single().id
+        assertTrue(savingController.workspaceHistoryEntries.single().previewPath.toFile().isFile)
 
-    @Test
-    fun magicToleranceRefreshesCurrentMagicSelection() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
+        val restoringDetector = CountingDetector()
+        val restoringController = AppController(
+            detector = restoringDetector,
             splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
         )
 
-        controller.loadFile(createToleranceImageFile())
-        controller.enterMagicSelectionMode()
-        controller.updateMagicTolerance(8)
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
-        val narrow = controller.selectedRegion
-        assertNotNull(narrow)
-        assertEquals(12, narrow.width)
+        restoringController.reopenHistorySnapshot(snapshotId)
 
-        controller.updateMagicTolerance(40)
-        val wide = controller.selectedRegion
-        assertNotNull(wide)
-        assertTrue(wide.width > narrow.width)
-        assertEquals(1, controller.regions.size)
-    }
+        assertEquals(0, restoringDetector.calls)
+        assertEquals(file.absolutePath, restoringController.imageFile?.absolutePath)
+        assertEquals(1, restoringController.regions.size)
+        assertEquals(18, restoringController.regions.single().x)
+        assertEquals(false, restoringController.regions.single().visible)
+        assertTrue(restoringController.hasManualEdits)
 
-    @Test
-    fun clickingInsideMagicRegionRefreshesInsteadOfCreatingNewRegion() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
-            splitter = CountingSplitter(),
-            exporter = NoopExporter(),
-            layoutSpec = LayoutSpec(),
-            localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
-        )
+        restoringController.resetManualEdits()
 
-        controller.loadFile(createToleranceImageFile())
-        controller.enterMagicSelectionMode()
-        controller.updateMagicTolerance(8)
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
-
-        val first = controller.selectedRegion
-        assertNotNull(first)
-        assertEquals(1, controller.regions.size)
-
-        controller.updateMagicTolerance(40)
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(8f, 8f))
-
-        val refreshed = controller.selectedRegion
-        assertNotNull(refreshed)
-        assertEquals(1, controller.regions.size)
-        assertEquals(first.id, refreshed.id)
-        assertTrue(refreshed.width > first.width)
-    }
-
-    @Test
-    fun magicSelectionReplacesExistingHitRegionInsteadOfCreatingNewRegion() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
-            splitter = CountingSplitter(),
-            exporter = NoopExporter(),
-            layoutSpec = LayoutSpec(),
-            localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
-        )
-
-        controller.loadFile(createToleranceImageFile())
-        controller.enterMagicSelectionMode()
-        controller.updateMagicTolerance(8)
-        controller.replaceRegions(
-            "test",
-            listOf(CropRegion("1", 5, 5, 4, 4, selected = true))
-        )
-
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
-
-        val refreshed = controller.selectedRegion
-        assertNotNull(refreshed)
-        assertEquals(1, controller.regions.size)
-        assertEquals("1", refreshed.id)
-        assertTrue(refreshed.width > 4)
-        assertTrue(refreshed.height > 4)
-    }
-
-    @Test
-    fun draggingMagicSelectionAddsDifferentColorRegionToCurrentSelection() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
-            splitter = CountingSplitter(),
-            exporter = NoopExporter(),
-            layoutSpec = LayoutSpec(),
-            localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
-        )
-
-        controller.loadFile(createToleranceImageFile())
-        controller.enterMagicSelectionMode()
-        controller.updateMagicTolerance(8)
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(7f, 7f))
-        val first = controller.selectedRegion
-        assertNotNull(first)
-
-        controller.extendMagicSelection(androidx.compose.ui.geometry.Offset(17f, 7f))
-
-        val merged = controller.selectedRegion
-        assertNotNull(merged)
-        assertEquals(1, controller.regions.size)
-        assertEquals(first.id, merged.id)
-        assertTrue(merged.width > first.width)
-        assertTrue(controller.magicSelectionPreview?.pixelCount ?: 0 > first.width * first.height)
-    }
-
-    @Test
-    fun magicSelectionIgnoresBackgroundLikeEdgeColor() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
-            splitter = CountingSplitter(),
-            exporter = NoopExporter(),
-            layoutSpec = LayoutSpec(),
-            localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
-        )
-
-        controller.loadFile(createMagicImageFile())
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(1f, 1f))
-
-        assertEquals(null, controller.selectedRegion)
-    }
-
-    @Test
-    fun magicSelectionConnectsDiagonalPixels() {
-        if (!CppDetectorBridge.isLoaded) return
-        val controller = AppController(
-            detector = StaticDetector(),
-            splitter = CountingSplitter(),
-            exporter = NoopExporter(),
-            layoutSpec = LayoutSpec(),
-            localization = DefaultLocalizationProvider,
-            layoutPolicy = DefaultLayoutConstraintPolicy()
-        )
-
-        controller.loadFile(createDiagonalMagicImageFile())
-        controller.applyMagicSelection(androidx.compose.ui.geometry.Offset(5f, 5f))
-
-        val selected = controller.selectedRegion
-        assertNotNull(selected)
-        assertEquals(4, selected.x)
-        assertEquals(4, selected.y)
-        assertEquals(14, selected.width)
-        assertEquals(14, selected.height)
+        assertEquals(1, restoringController.regions.size)
+        assertEquals(3, restoringController.regions.single().x)
+        assertEquals(4, restoringController.regions.single().y)
+        assertEquals(11, restoringController.regions.single().width)
+        assertEquals(9, restoringController.regions.single().height)
+        WorkspaceHistoryStore.clear()
     }
 
     @Test
@@ -512,7 +384,7 @@ class AppControllerTest {
     }
 
     @Test
-    fun loadingImageClampsDetectedRegionPointsIntoImageBounds() {
+    fun loadingImageClampsDetectedRegionIntoImageBounds() {
         val controller = AppController(
             detector = StaticDetector(
                 listOf(
@@ -521,13 +393,7 @@ class AppControllerTest {
                         x = -10,
                         y = -12,
                         width = 100,
-                        height = 80,
-                        points = listOf(
-                            io.github.workflowtool.model.RegionPoint(-10, -12),
-                            io.github.workflowtool.model.RegionPoint(100, -12),
-                            io.github.workflowtool.model.RegionPoint(100, 80),
-                            io.github.workflowtool.model.RegionPoint(-10, 80)
-                        )
+                        height = 80
                     )
                 )
             ),
@@ -545,7 +411,6 @@ class AppControllerTest {
         assertEquals(0, region.y)
         assertEquals(32, region.width)
         assertEquals(24, region.height)
-        assertTrue(region.points.all { it.x in 0..32 && it.y in 0..24 })
     }
 
     private fun createImageFile(width: Int = 64, height: Int = 32): java.io.File {
@@ -555,52 +420,6 @@ class AppControllerTest {
         graphics.fillRect(4, 4, 12, 12)
         graphics.dispose()
         val file = Files.createTempFile("workflowtool-controller", ".png").toFile()
-        ImageIO.write(image, "png", file)
-        return file
-    }
-
-    private fun createMagicImageFile(): java.io.File {
-        val image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color(0xF3, 0xF4, 0xF6)
-        graphics.fillRect(0, 0, 32, 32)
-        graphics.color = Color(0x23, 0x7A, 0xFF)
-        graphics.fillRect(5, 5, 10, 10)
-        graphics.dispose()
-        val file = Files.createTempFile("workflowtool-magic", ".png").toFile()
-        ImageIO.write(image, "png", file)
-        return file
-    }
-
-    private fun createToleranceImageFile(): java.io.File {
-        val image = BufferedImage(40, 24, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color(0xF5, 0xF5, 0xF5)
-        graphics.fillRect(0, 0, 40, 24)
-        graphics.color = Color(0x23, 0x7A, 0xFF)
-        graphics.fillRect(5, 5, 10, 10)
-        graphics.color = Color(0x36, 0x8B, 0xFF)
-        graphics.fillRect(15, 5, 6, 10)
-        graphics.dispose()
-        val file = Files.createTempFile("workflowtool-magic-tolerance", ".png").toFile()
-        ImageIO.write(image, "png", file)
-        return file
-    }
-
-    private fun createDiagonalMagicImageFile(): java.io.File {
-        val image = BufferedImage(24, 24, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color(0xF4, 0xF4, 0xF4)
-        graphics.fillRect(0, 0, 24, 24)
-        graphics.color = Color(0x24, 0x7B, 0xFE)
-        graphics.fillRect(5, 5, 2, 2)
-        graphics.fillRect(7, 7, 2, 2)
-        graphics.fillRect(9, 9, 2, 2)
-        graphics.fillRect(11, 11, 2, 2)
-        graphics.fillRect(13, 13, 2, 2)
-        graphics.fillRect(15, 15, 2, 2)
-        graphics.dispose()
-        val file = Files.createTempFile("workflowtool-magic-diagonal", ".png").toFile()
         ImageIO.write(image, "png", file)
         return file
     }

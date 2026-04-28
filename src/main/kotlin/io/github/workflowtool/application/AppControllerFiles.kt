@@ -55,7 +55,6 @@ private fun AppController.loadFileContent(file: File) {
         viewportOffset = Offset.Zero
         hoveredImagePoint = null
         backgroundPickArmed = false
-        magicSelectionPreview = null
         rememberRecentFile(file)
         log("图片加载成功：${file.name}，${loaded.width} x ${loaded.height}")
         regenerateBaseSafely(logResult = true)
@@ -115,12 +114,42 @@ fun AppController.loadFiles(files: List<File>) {
         viewportOffset = Offset.Zero
         hoveredImagePoint = null
         backgroundPickArmed = false
-        magicSelectionPreview = null
         log("多图画布加载成功：${loaded.size} 张，${combined.width} x ${combined.height}，间隔 ${multiImageGap}px")
         regenerateBaseSafely(logResult = true)
     }.onFailure {
         log("多图导入失败：${it.message}")
     }
+}
+
+internal fun AppController.loadSnapshotFiles(files: List<File>, restoredImageIndex: Int): Boolean {
+    val images = files.filter { it.isFile && it.extension.lowercase() in supportedImageExtensions }
+    if (images.isEmpty()) {
+        log("历史快照恢复失败：未找到可读取的源图片")
+        return false
+    }
+    return runCatching {
+        val loaded = images.mapNotNull { file ->
+            ImageIO.read(file)?.let { file to it }
+        }
+        if (loaded.isEmpty()) error("没有可读取的图片")
+        val restoredImage = if (loaded.size == 1) {
+            loaded.first().second
+        } else {
+            combineImages(loaded.map { it.second }, multiImageGap)
+        }
+        imageFiles = loaded.map { it.first }
+        currentImageIndex = restoredImageIndex.coerceIn(0, loaded.lastIndex)
+        imageFile = loaded[currentImageIndex].first
+        image = restoredImage
+        zoom = 1.0f
+        viewportOffset = Offset.Zero
+        hoveredImagePoint = null
+        backgroundPickArmed = false
+        rememberRecentFile(imageFile!!)
+        true
+    }.onFailure {
+        log("历史快照恢复失败：${it.message}")
+    }.getOrDefault(false)
 }
 
 private fun AppController.appendDroppedFiles(files: List<File>) {
@@ -139,7 +168,7 @@ private fun AppController.appendDroppedFiles(files: List<File>) {
         image = combined
         hoveredImagePoint = null
         backgroundPickArmed = false
-        magicSelectionPreview = null
+        rememberWorkspaceSnapshot()
         log("已拖入追加 ${loaded.size} 张图片：画布 ${combined.width} x ${combined.height}，原有选框已保留")
     }.onFailure {
         log("拖入图片失败：${it.message}")

@@ -16,7 +16,7 @@ def main() -> int:
     source_dirs = [
         path
         for path in training_root.iterdir()
-        if path.is_dir() and path.name not in {"combined", "recent_feedback", "background_feedback", "magic_feedback"}
+        if path.is_dir() and path.name not in {"combined", "recent_feedback", "background_feedback"}
     ]
 
     combined_records: List[Dict[str, object]] = []

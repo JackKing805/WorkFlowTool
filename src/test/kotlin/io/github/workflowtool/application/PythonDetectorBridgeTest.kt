@@ -1,31 +1,29 @@
 package io.github.workflowtool.application
 
+import io.github.workflowtool.model.DetectionConfig
+import io.github.workflowtool.model.hasMask
 import java.awt.Color
-import java.io.File
 import java.awt.image.BufferedImage
+import java.io.File
 import javax.imageio.ImageIO
 import kotlin.test.Test
-import kotlin.test.assertNotNull
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
-import io.github.workflowtool.model.DetectionConfig
 
 class PythonDetectorBridgeTest {
     @Test
-    fun parsesPolygonAwareDetectionPayload() {
+    fun parsesMaskFirstDetectionPayload() {
         val result = PythonDetectorBridge.parseDetectionResult(
             """
             {
               "mode":"solid_background",
               "regions":[
                 {
-                  "bbox":{"x":8,"y":10,"width":14,"height":16},
-                  "points":[
-                    {"x":8,"y":10},
-                    {"x":22,"y":10},
-                    {"x":22,"y":26},
-                    {"x":8,"y":26}
-                  ],
+                  "bbox":{"x":8,"y":10,"width":2,"height":2},
+                  "maskWidth":2,
+                  "maskHeight":2,
+                  "alphaMask":[255,0,220,255],
                   "score":0.875
                 }
               ],
@@ -35,24 +33,35 @@ class PythonDetectorBridgeTest {
                 "connectedComponents":1,
                 "regionCount":1,
                 "backgroundSampleCount":24,
-                "totalTimeMs":9
+                "totalTimeMs":9,
+                "backend":"mask_rcnn_onnx"
               }
             }
             """.trimIndent()
         )
 
         assertNotNull(result)
-        assertEquals(1, result.regions.size)
-        assertEquals(8, result.regions.first().x)
-        assertEquals(16, result.regions.first().height)
-        assertEquals(4, result.regions.first().points.size)
-        assertEquals(0.875f, result.regions.first().score)
+        val region = result.regions.first()
+        assertTrue(region.hasMask())
+        assertEquals(4, region.alphaMask.size)
+        assertEquals(0.875f, region.score)
         assertEquals(128, result.stats.candidatePixels)
+        assertEquals("mask_rcnn_onnx", result.stats.backend)
+    }
+
+    @Test
+    fun ignoresLegacyPayloadWithoutMask() {
+        val result = PythonDetectorBridge.parseDetectionResult(
+            """{"mode":"solid_background","regions":[{"bbox":{"x":8,"y":10,"width":14,"height":16}}]}"""
+        )
+
+        assertNotNull(result)
+        assertEquals(0, result.regions.size)
     }
 
     @Test
     fun detectsRegionsThroughPythonScriptWhenAvailable() {
-        if (!PythonDetectorBridge.isAvailable) return
+        if (!runPythonDetectorIntegrationTests()) return
 
         val image = BufferedImage(48, 48, BufferedImage.TYPE_INT_ARGB)
         val graphics = image.createGraphics()
@@ -78,11 +87,52 @@ class PythonDetectorBridgeTest {
 
         assertNotNull(result)
         assertTrue(result.regions.size >= 2)
+        assertTrue(result.regions.all { it.hasMask() })
+        assertEquals("mask_rcnn_onnx", result.stats.backend)
+    }
+
+    @Test
+    fun separatesForegroundObjectsFromStudioLikeBackground() {
+        if (!runPythonDetectorIntegrationTests()) return
+
+        val image = BufferedImage(96, 72, BufferedImage.TYPE_INT_ARGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color(0xF7, 0xF7, 0xF7)
+        graphics.fillRect(0, 0, 96, 72)
+        graphics.color = Color(0xE9, 0xEA, 0xEC)
+        graphics.fillRect(0, 54, 96, 18)
+        graphics.color = Color(0xD4, 0xD7, 0xDB)
+        graphics.fillRect(11, 39, 22, 8)
+        graphics.fillRect(57, 41, 18, 8)
+        graphics.color = Color(0x25, 0x2C, 0x38)
+        graphics.fillRect(14, 12, 18, 28)
+        graphics.color = Color(0xD7, 0x8F, 0x4D)
+        graphics.fillRect(60, 8, 14, 34)
+        graphics.dispose()
+
+        val result = PythonDetectorBridge.detect(
+            image,
+            DetectionConfig(
+                minWidth = 8,
+                minHeight = 8,
+                minPixelArea = 40,
+                bboxPadding = 0,
+                colorDistanceThreshold = 18,
+                backgroundTolerance = 18,
+                mergeNearbyRegions = false
+            )
+        )
+
+        assertNotNull(result)
+        assertTrue(result.regions.size >= 2)
+        assertTrue(result.regions.none { it.width >= 90 && it.height <= 20 })
+        assertTrue(result.regions.any { it.x <= 16 && it.width <= 24 && it.height >= 24 })
+        assertTrue(result.regions.any { it.x >= 56 && it.width <= 20 && it.height >= 28 })
     }
 
     @Test
     fun detectsAllActionFramesInTestSpriteSheet() {
-        if (!PythonDetectorBridge.isAvailable) return
+        if (!runPythonDetectorIntegrationTests()) return
         val file = File("test.png")
         if (!file.exists()) return
 
@@ -99,6 +149,14 @@ class PythonDetectorBridgeTest {
 
         assertNotNull(result)
         assertEquals(18, result.regions.size)
-        assertTrue(result.regions.all { it.width >= 100 && it.height >= 100 })
+        assertTrue(result.regions.all { it.width >= 100 && it.height >= 100 && it.hasMask() })
+    }
+
+    private fun runPythonDetectorIntegrationTests(): Boolean {
+        return System.getenv("WORKFLOWTOOL_RUN_PYTHON_DETECTOR_INTEGRATION")
+            ?.trim()
+            ?.lowercase()
+            ?.let { it == "1" || it == "true" || it == "yes" }
+            ?: false
     }
 }

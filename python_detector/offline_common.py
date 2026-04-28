@@ -61,68 +61,6 @@ def mean_rgba(values: Sequence[RGBA]) -> RGBA:
     )
 
 
-def rect_points_from_bbox(bbox: Dict[str, int]) -> List[Dict[str, int]]:
-    x = int(bbox["x"])
-    y = int(bbox["y"])
-    width = max(1, int(bbox["width"]))
-    height = max(1, int(bbox["height"]))
-    right = x + width
-    bottom = y + height
-    return [
-        {"x": x, "y": y},
-        {"x": right, "y": y},
-        {"x": right, "y": bottom},
-        {"x": x, "y": bottom},
-    ]
-
-
-def normalize_points(raw_points: Any) -> List[Dict[str, int]]:
-    if not isinstance(raw_points, list):
-        return []
-    normalized: List[Dict[str, int]] = []
-    for raw in raw_points:
-        point = normalize_point(raw)
-        if point is None:
-            continue
-        if normalized and normalized[-1] == point:
-            continue
-        normalized.append(point)
-    if len(normalized) > 1 and normalized[0] == normalized[-1]:
-        normalized.pop()
-    return normalized
-
-
-def normalize_point(raw: Any) -> Optional[Dict[str, int]]:
-    if isinstance(raw, dict):
-        x = raw.get("x")
-        y = raw.get("y")
-    elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
-        x, y = raw[0], raw[1]
-    else:
-        return None
-    try:
-        return {"x": int(round(float(x))), "y": int(round(float(y)))}
-    except (TypeError, ValueError):
-        return None
-
-
-def compute_bbox(points: Sequence[Dict[str, int]]) -> Optional[Dict[str, int]]:
-    if not points:
-        return None
-    xs = [int(point["x"]) for point in points]
-    ys = [int(point["y"]) for point in points]
-    min_x = min(xs)
-    min_y = min(ys)
-    max_x = max(xs)
-    max_y = max(ys)
-    return {
-        "x": min_x,
-        "y": min_y,
-        "width": max(1, max_x - min_x),
-        "height": max(1, max_y - min_y),
-    }
-
-
 def normalize_bbox(raw: Any) -> Optional[Dict[str, int]]:
     if not isinstance(raw, dict):
         return None
@@ -136,23 +74,39 @@ def normalize_bbox(raw: Any) -> Optional[Dict[str, int]]:
     return {"x": x, "y": y, "width": width, "height": height}
 
 
+def normalize_alpha_mask(raw: Any, width: int, height: int) -> List[int]:
+    if not isinstance(raw, list) or len(raw) != width * height:
+        return []
+    output: List[int] = []
+    for value in raw:
+        try:
+            output.append(max(0, min(255, int(round(float(value))))))
+        except (TypeError, ValueError):
+            return []
+    if not any(value > 0 for value in output):
+        return []
+    return output
+
+
 def canonicalize_instance(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     bbox = normalize_bbox(raw.get("bbox")) or normalize_bbox(raw)
-    points = normalize_points(raw.get("points"))
-    if not points and bbox is not None:
-        points = rect_points_from_bbox(bbox)
-    if not bbox and points:
-        bbox = compute_bbox(points)
     if bbox is None:
         return None
-    if not points:
-        points = rect_points_from_bbox(bbox)
-    bbox = compute_bbox(points) or bbox
+    try:
+        mask_width = int(raw["maskWidth"])
+        mask_height = int(raw["maskHeight"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    alpha_mask = normalize_alpha_mask(raw.get("alphaMask"), mask_width, mask_height)
+    if not alpha_mask:
+        return None
     return {
         "bbox": bbox,
-        "points": points,
+        "maskWidth": mask_width,
+        "maskHeight": mask_height,
+        "alphaMask": alpha_mask,
         "label": str(raw.get("label") or "icon"),
     }
 
@@ -182,20 +136,11 @@ def canonicalize_record(record: Dict[str, Any], dataset_root: Path) -> Optional[
             if instance is not None:
                 instances.append(instance)
     if not instances:
-        raw_regions = record.get("regions")
-        if isinstance(raw_regions, list):
-            for raw in raw_regions:
-                instance = canonicalize_instance(raw)
-                if instance is not None:
-                    instances.append(instance)
-    if not instances:
         return None
-    regions = [instance["bbox"] for instance in instances]
     return {
         "image": image_path,
         "imageHash": str(record.get("imageHash") or ""),
         "instances": instances,
-        "regions": regions,
     }
 
 

@@ -15,6 +15,12 @@ import androidx.compose.material.DropdownMenu
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,8 +40,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isAltPressed
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.pointerHoverIcon
@@ -46,9 +54,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
-import io.github.workflowtool.application.MagicSelectionPreview
 import io.github.workflowtool.model.CropRegion
-import io.github.workflowtool.model.RegionPoint
+import io.github.workflowtool.model.MaskEditMode
 import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.ui.theme.Accent
 import io.github.workflowtool.ui.theme.Panel
@@ -61,17 +68,18 @@ import java.util.UUID
 private enum class DragKind {
     Pan,
     RegionEdit,
-    Draw,
-    Magic
+    SelectionBrush,
+    Draw
 }
 
 private data class DragSession(
     val kind: DragKind,
     val regionId: String?,
-    val pointIndex: Int?,
     val baseRegions: List<CropRegion>,
     val start: Offset
 )
+
+private fun selectionBrushRadius(zoom: Float): Int = (18f / zoom.coerceAtLeast(0.25f)).roundToInt().coerceIn(4, 48)
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -84,7 +92,6 @@ fun EditorCanvas(
     zoom: Float,
     viewportOffset: Offset,
     showGrid: Boolean,
-    magicPreview: MagicSelectionPreview?,
     toolMode: ToolMode,
     backgroundPickArmed: Boolean,
     onViewport: (Size) -> Unit,
@@ -92,8 +99,7 @@ fun EditorCanvas(
     onZoom: (Float, Offset) -> Unit,
     onCommit: (String, List<CropRegion>) -> Unit,
     onSelect: (String, Boolean) -> Unit,
-    onMagicSelect: (Offset) -> Unit,
-    onMagicExtend: (Offset) -> Unit,
+    onDetectInsideRegion: (CropRegion) -> Unit,
     onBackgroundPick: (Offset) -> Unit,
     onHover: (Offset?) -> Unit,
     onClearSelection: () -> Unit,
@@ -110,11 +116,22 @@ fun EditorCanvas(
     var contextMenu by remember { mutableStateOf<CanvasContextMenuState?>(null) }
     var pointerPosition by remember { mutableStateOf<Offset?>(null) }
     var hoveredRegionId by remember { mutableStateOf<String?>(null) }
+    var selectionEditMode by remember { mutableStateOf(MaskEditMode.Replace) }
     val latestRegions by rememberUpdatedState(regions)
     val latestZoom by rememberUpdatedState(zoom)
     val latestViewportOffset by rememberUpdatedState(viewportOffset)
     val latestToolMode by rememberUpdatedState(toolMode)
     val latestBackgroundPickArmed by rememberUpdatedState(backgroundPickArmed)
+    val antTransition = rememberInfiniteTransition(label = "selection-ants")
+    val antsPhase by antTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 12f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 700, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "selection-ants-phase"
+    )
 
     val renderedRegions = workingRegions ?: regions
     val visibleOverlayRegions = (renderedRegions + listOfNotNull(draftRegion)).filter { it.visible }
@@ -139,6 +156,11 @@ fun EditorCanvas(
                     return@onPointerEvent
                 }
                 if (event.buttons.isPrimaryPressed) {
+                    selectionEditMode = when {
+                        event.keyboardModifiers.isAltPressed -> MaskEditMode.Subtract
+                        event.keyboardModifiers.isShiftPressed -> MaskEditMode.Add
+                        else -> MaskEditMode.Replace
+                    }
                     val imagePoint = screenToImage(change.position, latestViewportOffset, latestZoom)
                     val hit = findRegionHit(latestRegions, imagePoint)
                     if (hit != null) {
@@ -156,7 +178,6 @@ fun EditorCanvas(
                 contextMenu = CanvasContextMenuState(
                     regionId = hit?.id,
                     imagePoint = imagePoint,
-                    pointIndex = hit?.let { findPointHit(it, imagePoint, latestZoom) },
                     visible = true,
                     offset = IntOffset(change.position.x.roundToInt(), change.position.y.roundToInt())
                 )
@@ -171,10 +192,6 @@ fun EditorCanvas(
                             if (latestBackgroundPickArmed) {
                                 onBackgroundPick(imagePoint)
                                 return@detectTapGestures
-                            }
-                            if (latestToolMode == ToolMode.Magic) {
-                                if (findRegionHit(latestRegions, imagePoint) != null) return@detectTapGestures
-                                onMagicSelect(imagePoint)
                             }
                         },
                         onTap = { offset ->
@@ -191,14 +208,16 @@ fun EditorCanvas(
                                 return@detectTapGestures
                             }
                             onClearSelection()
-                            if (latestToolMode == ToolMode.Magic) {
-                                onMagicSelect(imagePoint)
-                            }
                         }
                     )
                 }
                 .onPointerEvent(PointerEventType.Move) { event ->
                     val point = event.changes.firstOrNull()?.position ?: return@onPointerEvent
+                    selectionEditMode = when {
+                        event.keyboardModifiers.isAltPressed -> MaskEditMode.Subtract
+                        event.keyboardModifiers.isShiftPressed -> MaskEditMode.Add
+                        else -> MaskEditMode.Replace
+                    }
                     pointerPosition = point
                     val imagePoint = screenToImage(point, latestViewportOffset, latestZoom)
                     hoveredRegionId = findRegionHit(renderedRegions, imagePoint)?.id
@@ -222,35 +241,29 @@ fun EditorCanvas(
                                 onBackgroundPick(imagePoint)
                                 return@detectDragGestures
                             }
-                            val handleHit = findHandleHit(latestRegions, imagePoint, latestZoom)
                             val hit = findRegionHit(latestRegions, imagePoint)
                             contextMenu = null
                             when {
                                 latestToolMode == ToolMode.Move -> {
-                                    dragSession = DragSession(DragKind.Pan, null, null, latestRegions, offset)
+                                    dragSession = DragSession(DragKind.Pan, null, latestRegions, offset)
                                     workingRegions = null
                                 }
-                                handleHit != null || hit != null -> {
-                                    val active = handleHit?.first ?: hit!!
+                                hit != null -> {
+                                    val active = hit
                                     hoveredRegionId = active.id
                                     val base = latestRegions.map {
                                         if (it.id == active.id) it.copy(selected = true) else if (!it.selected) it else it.copy(selected = false)
                                     }
-                                    dragSession = DragSession(DragKind.RegionEdit, active.id, handleHit?.second, base, imagePoint)
+                                    dragSession = DragSession(DragKind.RegionEdit, active.id, base, imagePoint)
                                     workingRegions = base
                                     onSelect(active.id, false)
                                 }
-                                latestToolMode == ToolMode.Magic -> {
-                                    dragSession = DragSession(DragKind.Magic, null, null, latestRegions, imagePoint)
-                                    workingRegions = null
-                                    onMagicSelect(imagePoint)
-                                }
                                 latestToolMode != ToolMode.Draw -> {
-                                    dragSession = DragSession(DragKind.Pan, null, null, latestRegions, offset)
+                                    dragSession = DragSession(DragKind.Pan, null, latestRegions, offset)
                                     workingRegions = null
                                 }
                                 else -> {
-                                    dragSession = DragSession(DragKind.Draw, null, null, latestRegions, imagePoint)
+                                    dragSession = DragSession(DragKind.Draw, null, latestRegions, imagePoint)
                                     draftRegion = CropRegion(
                                         UUID.randomUUID().toString(),
                                         imagePoint.x.roundToInt(),
@@ -269,21 +282,25 @@ fun EditorCanvas(
                             when (session.kind) {
                                 DragKind.Pan -> onPan(dragAmount)
                                 DragKind.RegionEdit -> {
-                                    val current = screenToImage(change.position, latestViewportOffset, latestZoom)
                                     hoveredRegionId = session.regionId
-                                    val next = if (session.pointIndex != null) {
-                                        session.baseRegions.map {
-                                            if (it.id == session.regionId) moveRegionPoint(it, session.pointIndex, current, maxWidth, maxHeight) else it
+                                    val dx = (dragAmount.x / latestZoom).roundToInt()
+                                    val dy = (dragAmount.y / latestZoom).roundToInt()
+                                    val next = (workingRegions ?: session.baseRegions).map {
+                                        if (it.selected) {
+                                            moveRegion(it, dx, dy, maxWidth, maxHeight)
+                                        } else {
+                                            it
                                         }
-                                    } else {
-                                        val dx = (dragAmount.x / latestZoom).roundToInt()
-                                        val dy = (dragAmount.y / latestZoom).roundToInt()
-                                        (workingRegions ?: session.baseRegions).map {
-                                            if (it.selected) {
-                                                moveRegion(it, dx, dy, maxWidth, maxHeight)
-                                            } else {
-                                                it
-                                            }
+                                    }
+                                    workingRegions = next
+                                }
+                                DragKind.SelectionBrush -> {
+                                    val current = screenToImage(change.position, latestViewportOffset, latestZoom)
+                                    val next = (workingRegions ?: session.baseRegions).map {
+                                        if (it.id == session.regionId) {
+                                            editSelectionMask(it, current, selectionBrushRadius(latestZoom), selectionEditMode, maxWidth, maxHeight)
+                                        } else {
+                                            it
                                         }
                                     }
                                     workingRegions = next
@@ -304,22 +321,19 @@ fun EditorCanvas(
                                         selected = true
                                     )
                                 }
-                                DragKind.Magic -> {
-                                    onMagicExtend(screenToImage(change.position, latestViewportOffset, latestZoom))
-                                }
                             }
                         },
                         onDragEnd = {
                             when (dragSession?.kind) {
                                 DragKind.Draw -> {
                                     draftRegion?.takeIf { it.width >= 2 && it.height >= 2 }?.let { created ->
-                                        onCommit("创建区域", latestRegions.map { it.copy(selected = false) } + created)
+                                        onDetectInsideRegion(created)
                                     }
                                 }
-                                DragKind.RegionEdit -> {
+                                DragKind.RegionEdit, DragKind.SelectionBrush -> {
                                     workingRegions?.let { onCommit("编辑区域", it) }
                                 }
-                                DragKind.Pan, DragKind.Magic, null -> Unit
+                                DragKind.Pan, null -> Unit
                             }
                             dragSession = null
                             draftRegion = null
@@ -338,12 +352,8 @@ fun EditorCanvas(
                     dstSize = IntSize((it.width * zoom).roundToInt(), (it.height * zoom).roundToInt())
                 )
             }
-            magicPreview?.let {
-                drawMagicMask(it, zoom, viewportOffset)
-                drawSeedMarker(it.seedX, it.seedY, zoom, viewportOffset)
-            }
             visibleOverlayRegions.forEach { region ->
-                drawRegionOutline(region, zoom, viewportOffset, overlayStyleForRegion(region, hoveredRegionId))
+                drawRegionOutline(region, zoom, viewportOffset, overlayStyleForRegion(region, hoveredRegionId), antsPhase)
             }
         }
 

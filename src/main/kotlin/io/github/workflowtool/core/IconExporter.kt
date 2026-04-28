@@ -5,15 +5,9 @@ import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
-import io.github.workflowtool.model.RegionGroup
-import io.github.workflowtool.model.RegionPoint
-import io.github.workflowtool.model.resolveRegionGroup
-import io.github.workflowtool.model.resolveRegionGroups
-import java.awt.AlphaComposite
+import io.github.workflowtool.model.hasMask
 import java.awt.Color
 import java.awt.RenderingHints
-import java.awt.geom.Area
-import java.awt.geom.Path2D
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import javax.imageio.ImageIO
@@ -34,15 +28,9 @@ class IconExporter {
         val failures = mutableListOf<String>()
         var success = 0
 
-        val exportGroups = resolveRegionGroups(regions)
-            .filter { it.root.visible }
-            .ifEmpty {
-                regions.filter { it.visible }.map { RegionGroup(root = it, members = listOf(it), holes = emptyList()) }
-            }
-
-        exportGroups.forEachIndexed { index, group ->
+        regions.filter { it.visible }.forEachIndexed { index, region ->
             try {
-                val cropped = cropPreview(image, group.root, group.members)
+                val cropped = cropPreview(image, region)
                 val processed = process(cropped, config)
                 val output = nextOutputPath(sourceFileName, index + 1, config)
                 if (output.exists() && !config.overwriteExisting) {
@@ -56,7 +44,7 @@ class IconExporter {
                     success++
                 }
             } catch (error: Exception) {
-                failures += "Region ${group.root.id}: ${error.message ?: error::class.simpleName}"
+                failures += "Region ${region.id}: ${error.message ?: error::class.simpleName}"
             }
         }
 
@@ -75,66 +63,47 @@ class IconExporter {
     }
 
     fun cropPreview(image: BufferedImage, region: CropRegion, allRegions: List<CropRegion> = listOf(region)): BufferedImage {
-        val group = resolveRegionGroup(allRegions, region.id)?.let {
-            it.copy(
-                members = it.members.filter(CropRegion::visible),
-                holes = it.holes.filter(CropRegion::visible)
-            )
-        } ?: RegionGroup(root = region, members = listOf(region), holes = emptyList())
-        val outer = group.root
-        val x = outer.x.coerceIn(0, image.width - 1)
-        val y = outer.y.coerceIn(0, image.height - 1)
-        val width = outer.width.coerceAtMost(image.width - x).coerceAtLeast(1)
-        val height = outer.height.coerceAtMost(image.height - y).coerceAtLeast(1)
-        val regionPoints = outer.editPoints
-        if (regionPoints.size < 3 && group.holes.isEmpty()) {
-            return image.getSubimage(x, y, width, height)
+        val x = region.x.coerceIn(0, image.width - 1)
+        val y = region.y.coerceIn(0, image.height - 1)
+        val width = region.width.coerceAtMost(image.width - x).coerceAtLeast(1)
+        val height = region.height.coerceAtMost(image.height - y).coerceAtLeast(1)
+        if (region.hasMask()) {
+            return cropPreviewWithMask(image, region, x, y, width, height)
         }
+        return image.getSubimage(x, y, width, height)
+    }
 
-        val source = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val sourceGraphics = source.createGraphics()
-        sourceGraphics.drawImage(image, 0, 0, width, height, x, y, x + width, y + height, null)
-        sourceGraphics.dispose()
-
-        val compositeArea = Area(polygonPath(normalizePoints(outer, x, y, width, height)))
-        group.holes
-            .filter { it.id != outer.id }
-            .forEach { hole ->
-                compositeArea.subtract(Area(polygonPath(normalizePoints(hole, x, y, width, height))))
-            }
-
-        val mask = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val maskGraphics = mask.createGraphics()
-        maskGraphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        maskGraphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        maskGraphics.color = Color.WHITE
-        maskGraphics.fill(compositeArea)
-        maskGraphics.dispose()
-
+    private fun cropPreviewWithMask(
+        image: BufferedImage,
+        region: CropRegion,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int
+    ): BufferedImage {
         val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        val outputGraphics = output.createGraphics()
-        outputGraphics.drawImage(source, 0, 0, null)
-        outputGraphics.composite = AlphaComposite.DstIn
-        outputGraphics.drawImage(mask, 0, 0, null)
-        outputGraphics.dispose()
+        for (localY in 0 until height) {
+            for (localX in 0 until width) {
+                val sourceX = x + localX
+                val sourceY = y + localY
+                val maskX = sourceX - region.x
+                val maskY = sourceY - region.y
+                val maskAlpha = if (maskX in 0 until region.maskWidth && maskY in 0 until region.maskHeight) {
+                    region.alphaMask[maskY * region.maskWidth + maskX].coerceIn(0, 255)
+                } else {
+                    0
+                }
+                if (maskAlpha <= 0) {
+                    output.setRGB(localX, localY, 0)
+                    continue
+                }
+                val argb = image.getRGB(sourceX, sourceY)
+                val sourceAlpha = argb ushr 24 and 0xFF
+                val alpha = (sourceAlpha * (maskAlpha / 255f)).roundToInt().coerceIn(0, 255)
+                output.setRGB(localX, localY, (alpha shl 24) or (argb and 0x00FFFFFF))
+            }
+        }
         return output
-    }
-
-    private fun normalizePoints(region: CropRegion, offsetX: Int, offsetY: Int, width: Int, height: Int): List<RegionPoint> {
-        return region.editPoints.map {
-            RegionPoint(
-                x = it.x.coerceIn(offsetX, offsetX + width) - offsetX,
-                y = it.y.coerceIn(offsetY, offsetY + height) - offsetY
-            )
-        }
-    }
-
-    private fun polygonPath(points: List<RegionPoint>): Path2D.Float {
-        return Path2D.Float().apply {
-            moveTo(points.first().x.toFloat(), points.first().y.toFloat())
-            points.drop(1).forEach { lineTo(it.x.toFloat(), it.y.toFloat()) }
-            closePath()
-        }
     }
 
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {

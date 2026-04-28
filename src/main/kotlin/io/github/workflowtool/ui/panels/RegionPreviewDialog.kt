@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.AlertDialog
@@ -102,7 +101,7 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun RegionPreviewDialog(controller: AppController, region: CropRegion) {
-    val bitmap = remember(controller.image, controller.regions, region.x, region.y, region.width, region.height, region.points) {
+    val bitmap = remember(controller.image, controller.regions, region.x, region.y, region.width, region.height, region.maskWidth, region.maskHeight, region.alphaMask) {
         controller.image?.let { previewCropper.cropPreview(it, region, controller.regions).toComposeImageBitmap() }
     }
     if (bitmap == null) return

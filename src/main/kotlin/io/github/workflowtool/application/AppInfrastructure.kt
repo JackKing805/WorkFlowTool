@@ -55,33 +55,11 @@ abstract class BaseRegionExporter : RegionExporter {
     ): ExportResult
 }
 
-class CppRegionDetector(
-    private val bridge: NativeDetectorBridge = CppDetectorBridge
-) : BaseRegionDetector() {
-    override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
-        return bridge.detect(image, config)
-            ?.let { postProcessDetection(image, config, it) }
-            ?: emptyDetectionResult()
-    }
-}
-
 class PythonRegionDetector : BaseRegionDetector() {
     override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
         return PythonDetectorBridge.detect(image, config)
             ?.let { postProcessDetection(image, config, it) }
             ?: emptyDetectionResult()
-    }
-}
-
-class CompositeRegionDetector(
-    private vararg val detectors: RegionDetector
-) : BaseRegionDetector() {
-    override fun doDetect(image: BufferedImage, config: DetectionConfig): DetectionResult {
-        for (detector in detectors) {
-            val result = detector.detect(image, config)
-            if (result.regions.isNotEmpty()) return result
-        }
-        return emptyDetectionResult()
     }
 }
 
@@ -109,20 +87,12 @@ object UnavailableNativeImageEngine : NativeImageEngine {
     override val detail: String = "native unavailable"
 }
 
-object CppOnlyNativeImageEngine : NativeImageEngine {
+object PythonImageEngine : NativeImageEngine {
     override val isAvailable: Boolean
-        get() = CppDetectorBridge.isLoaded
-    override val backendName: String = "C++"
+        get() = PythonDetectorBridge.isAvailable
+    override val backendName: String = "Python"
     override val detail: String
-        get() = CppDetectorBridge.status
-}
-
-object PythonThenCppImageEngine : NativeImageEngine {
-    override val isAvailable: Boolean
-        get() = PythonDetectorBridge.isAvailable || CppDetectorBridge.isLoaded
-    override val backendName: String = "Python + C++"
-    override val detail: String
-        get() = "${PythonDetectorBridge.status}; ${CppDetectorBridge.status}"
+        get() = "${PythonDetectorBridge.status}; ${PythonEnvironmentManager.statusSummary()}"
 }
 
 class DefaultLayoutConstraintPolicy : LayoutConstraintPolicy {
@@ -215,7 +185,7 @@ data class LayoutSpec(
 )
 
 object ServiceFactory {
-    fun detector(): RegionDetector = CompositeRegionDetector(PythonRegionDetector(), CppRegionDetector())
+    fun detector(): RegionDetector = PythonRegionDetector()
 
     fun splitter(): RegionSplitter = CppRegionSplitter()
 

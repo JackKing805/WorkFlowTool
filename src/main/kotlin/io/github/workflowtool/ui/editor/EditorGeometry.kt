@@ -46,14 +46,15 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
-import io.github.workflowtool.application.MagicSelectionPreview
 import io.github.workflowtool.model.CropRegion
-import io.github.workflowtool.model.RegionPoint
+import io.github.workflowtool.model.MaskEditMode
+import io.github.workflowtool.model.applyBrushToMask
+import io.github.workflowtool.model.hasMask
+import io.github.workflowtool.model.maskAlphaAt
 import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.ui.theme.Accent
 import io.github.workflowtool.ui.theme.Panel
 import io.github.workflowtool.ui.theme.SoftBorder
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.awt.Cursor
 import java.util.UUID
@@ -92,137 +93,46 @@ internal fun findRegionHitTarget(regions: List<CropRegion>, point: Offset, zoom:
 }
 
 private fun pointInsideRegion(region: CropRegion, point: Offset): Boolean {
-    val points = region.editPoints
-    if (points.size < 3) {
-        return point.x in region.x.toFloat()..region.right.toFloat() &&
-            point.y in region.y.toFloat()..region.bottom.toFloat()
-    }
-
-    var inside = false
-    var previous = points.last()
-    for (current in points) {
-        val crosses = (current.y > point.y) != (previous.y > point.y)
-        if (crosses) {
-            val intersectionX = (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y).toFloat() + current.x
-            if (point.x < intersectionX) inside = !inside
-        }
-        previous = current
-    }
-    return inside
-}
-
-fun findPointHit(region: CropRegion, point: Offset, zoom: Float): Int? {
-    if (!region.visible) return null
-    val radius = handleHitRadius(zoom)
-    return region.editPoints.indexOfLast { abs(point.x - it.x) <= radius && abs(point.y - it.y) <= radius }
-        .takeIf { it >= 0 }
-}
-
-fun findHandleHit(regions: List<CropRegion>, point: Offset, zoom: Float): Pair<CropRegion, Int>? {
-    val ordered = regions.indices
-        .sortedWith(
-            compareByDescending<Int> { regions[it].selected }
-                .thenByDescending { candidate -> candidate }
-        )
-    for (index in ordered) {
-        val region = regions[index]
-        val pointIndex = findPointHit(region, point, zoom)
-        if (pointIndex != null) return region to pointIndex
-    }
-    return null
-}
-
-fun moveRegionPoint(region: CropRegion, pointIndex: Int, point: Offset, imageWidth: Int, imageHeight: Int): CropRegion {
-    val points = region.editPoints.toMutableList()
-    if (pointIndex !in points.indices) return region
-    points[pointIndex] = RegionPoint(
-        point.x.roundToInt().coerceIn(0, imageWidth),
-        point.y.roundToInt().coerceIn(0, imageHeight)
-    )
-    return region.withPoints(points)
+    if (region.hasMask()) return region.maskAlphaAt(point.x.roundToInt(), point.y.roundToInt()) > 12
+    return point.x >= region.x && point.x <= region.right && point.y >= region.y && point.y <= region.bottom
 }
 
 fun moveRegion(region: CropRegion, dx: Int, dy: Int, imageWidth: Int, imageHeight: Int): CropRegion {
     val clampedDx = dx.coerceIn(-region.x, imageWidth - region.right)
     val clampedDy = dy.coerceIn(-region.y, imageHeight - region.bottom)
-    val points = region.editPoints.map { RegionPoint(it.x + clampedDx, it.y + clampedDy) }
-    return region.withPoints(points)
+    return region.copy(x = region.x + clampedDx, y = region.y + clampedDy)
 }
 
-fun addRegionPoint(region: CropRegion, point: Offset, imageWidth: Int, imageHeight: Int): CropRegion {
-    val newPoint = RegionPoint(
-        point.x.roundToInt().coerceIn(0, imageWidth),
-        point.y.roundToInt().coerceIn(0, imageHeight)
-    )
-    val points = region.editPoints
-    val insertAt = nearestSegmentIndex(points, newPoint) + 1
-    return region.withPoints(points.toMutableList().apply { add(insertAt, newPoint) })
-}
-
-fun removeRegionPoint(region: CropRegion, pointIndex: Int): CropRegion {
-    val points = region.editPoints
-    if (points.size <= 3 || pointIndex !in points.indices) return region
-    return region.withPoints(points.toMutableList().apply { removeAt(pointIndex) })
-}
+fun editSelectionMask(
+    region: CropRegion,
+    point: Offset,
+    radius: Int,
+    mode: MaskEditMode,
+    imageWidth: Int,
+    imageHeight: Int
+): CropRegion = region.applyBrushToMask(
+    centerX = point.x.roundToInt().coerceIn(0, imageWidth),
+    centerY = point.y.roundToInt().coerceIn(0, imageHeight),
+    radius = radius,
+    mode = mode,
+    imageWidth = imageWidth,
+    imageHeight = imageHeight
+)
 
 fun List<CropRegion>.replaceRegion(updated: CropRegion): List<CropRegion> =
     map { if (it.id == updated.id) updated else it }
 
-private fun CropRegion.withPoints(points: List<RegionPoint>): CropRegion {
-    val minX = points.minOf { it.x }
-    val minY = points.minOf { it.y }
-    val maxX = points.maxOf { it.x }
-    val maxY = points.maxOf { it.y }
-    return copy(
-        x = minX,
-        y = minY,
-        width = (maxX - minX).coerceAtLeast(1),
-        height = (maxY - minY).coerceAtLeast(1),
-        points = points
-    )
-}
-
-private fun nearestSegmentIndex(points: List<RegionPoint>, point: RegionPoint): Int {
-    var bestIndex = 0
-    var bestDistance = Float.MAX_VALUE
-    for (index in points.indices) {
-        val next = points[(index + 1) % points.size]
-        val distance = distanceToSegment(point, points[index], next)
-        if (distance < bestDistance) {
-            bestDistance = distance
-            bestIndex = index
-        }
-    }
-    return bestIndex
-}
-
-private fun distanceToSegment(point: RegionPoint, start: RegionPoint, end: RegionPoint): Float {
-    val dx = (end.x - start.x).toFloat()
-    val dy = (end.y - start.y).toFloat()
-    val lengthSquared = dx * dx + dy * dy
-    if (lengthSquared == 0f) return abs(point.x - start.x) + abs(point.y - start.y).toFloat()
-    val t = (((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared).coerceIn(0f, 1f)
-    val projectionX = start.x + t * dx
-    val projectionY = start.y + t * dy
-    val px = point.x - projectionX
-    val py = point.y - projectionY
-    return px * px + py * py
-}
-
 private fun pointNearRegionEdge(region: CropRegion, point: Offset, zoom: Float): Boolean {
-    val points = region.editPoints
-    if (points.size < 2) return false
+    if (region.hasMask()) return region.maskAlphaAt(point.x.roundToInt(), point.y.roundToInt()) in 1..220
     val threshold = (11f / zoom).coerceAtLeast(4.5f)
-    for (index in points.indices) {
-        val next = points[(index + 1) % points.size]
-        if (distanceToSegment(
-                RegionPoint(point.x.roundToInt(), point.y.roundToInt()),
-                points[index],
-                next
-            ) <= threshold * threshold
-        ) {
-            return true
-        }
-    }
-    return false
+    val x = point.x
+    val y = point.y
+    val inside = x >= region.x && x <= region.right && y >= region.y && y <= region.bottom
+    if (!inside) return false
+    return minOf(
+        kotlin.math.abs(x - region.x),
+        kotlin.math.abs(x - region.right),
+        kotlin.math.abs(y - region.y),
+        kotlin.math.abs(y - region.bottom)
+    ) <= threshold
 }

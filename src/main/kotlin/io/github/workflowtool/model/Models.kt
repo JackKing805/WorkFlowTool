@@ -10,27 +10,20 @@ data class CropRegion(
     val height: Int,
     val visible: Boolean = true,
     val selected: Boolean = false,
-    val points: List<RegionPoint> = emptyList(),
+    val maskWidth: Int = 0,
+    val maskHeight: Int = 0,
+    val alphaMask: List<Int> = emptyList(),
     val score: Float? = null
 ) {
     val right: Int get() = x + width
     val bottom: Int get() = y + height
-
-    val editPoints: List<RegionPoint>
-        get() = points.ifEmpty {
-            listOf(
-                RegionPoint(x, y),
-                RegionPoint(right, y),
-                RegionPoint(right, bottom),
-                RegionPoint(x, bottom)
-            )
-        }
 }
 
-data class RegionPoint(
-    val x: Int,
-    val y: Int
-)
+enum class MaskEditMode {
+    Replace,
+    Add,
+    Subtract
+}
 
 data class DetectionConfig(
     val minWidth: Int = 16,
@@ -63,7 +56,8 @@ data class DetectionStats(
     val connectedComponents: Int,
     val regionCount: Int,
     val backgroundSampleCount: Int,
-    val totalTimeMs: Long
+    val totalTimeMs: Long,
+    val backend: String = ""
 )
 
 data class DetectionResult(
@@ -108,7 +102,6 @@ enum class ToolMode {
     Select,
     Move,
     Draw,
-    Magic,
     Eyedropper
 }
 

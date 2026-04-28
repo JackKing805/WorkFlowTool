@@ -5,7 +5,6 @@ import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionMode
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
-import io.github.workflowtool.model.RegionPoint
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import javax.imageio.ImageIO
@@ -13,44 +12,15 @@ import kotlin.io.path.exists
 
 internal object PythonDetectorBridge {
     private val script get() = AppRuntimeFiles.pythonDir.resolve("detect_icons.py")
-    private data class Availability(val available: Boolean, val status: String)
 
-    private val availability: Availability by lazy {
-        val scriptPath = script
-        if (!scriptPath.exists()) {
-            return@lazy Availability(false, "python detector missing ($scriptPath)")
-        }
-        if (!PythonRuntime.isAvailable) {
-            return@lazy Availability(false, PythonRuntime.status(scriptAvailable = true, script = scriptPath))
-        }
-        val command = PythonRuntime.buildCommand(listOf(scriptPath.toString(), "--help"))
-            ?: return@lazy Availability(false, PythonRuntime.status(scriptAvailable = true, script = scriptPath))
-        runCatching {
-            val process = PythonRuntime.configureProcess(
-                ProcessBuilder(command)
-                .directory(AppRuntimeFiles.pythonDir.parent.toFile())
-                .redirectErrorStream(true)
-            ).start()
-            val output = process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText().trim() }
-            if (process.waitFor() == 0) {
-                Availability(true, PythonRuntime.status(scriptAvailable = true, script = scriptPath))
-            } else {
-                val detail = output.lineSequence().firstOrNull { it.isNotBlank() } ?: "probe failed"
-                Availability(false, "python detector unavailable ($detail); ${PythonRuntime.status(scriptAvailable = true, script = scriptPath)}")
-            }
-        }.getOrElse {
-            Availability(
-                false,
-                "python detector unavailable (${it.message ?: it::class.simpleName}); ${PythonRuntime.status(scriptAvailable = true, script = scriptPath)}"
-            )
-        }
-    }
-
-    val isAvailable: Boolean get() = availability.available
-    val status: String get() = availability.status
+    val isAvailable: Boolean
+        get() = script.exists() && PythonRuntime.isAvailable
+    val status: String
+        get() = PythonRuntime.status(scriptAvailable = script.exists(), script = script)
 
     fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult? {
-        if (!isAvailable) return null
+        val environment = PythonEnvironmentManager.ensureReady()
+        if (!environment.ready) return null
         val temp = Files.createTempFile("workflowtool-python-detect", ".png")
         return try {
             ImageIO.write(image, "png", temp.toFile())
@@ -59,36 +29,14 @@ internal object PythonDetectorBridge {
                     script.toString(),
                     "--image",
                     temp.toString(),
-                    "--min-width",
-                    config.minWidth.toString(),
-                    "--min-height",
-                    config.minHeight.toString(),
-                    "--min-pixel-area",
-                    config.minPixelArea.toString(),
-                    "--alpha-threshold",
-                    config.alphaThreshold.toString(),
-                    "--background-tolerance",
-                    config.backgroundTolerance.toString(),
-                    "--color-distance-threshold",
-                    config.colorDistanceThreshold.toString(),
-                    "--edge-sample-width",
-                    config.edgeSampleWidth.toString(),
-                    "--dilate-iterations",
-                    config.dilateIterations.toString(),
-                    "--erode-iterations",
-                    config.erodeIterations.toString(),
-                    "--bbox-padding",
-                    config.bboxPadding.toString(),
-                    "--gap-threshold",
-                    config.gapThreshold.toString(),
-                    "--manual-background-argb",
-                    config.manualBackgroundArgb.toString()
+                    "--model",
+                    AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.onnx").toString(),
+                    "--score-threshold",
+                    scoreThreshold(config).toString(),
+                    "--mask-threshold",
+                    "0.5"
                 )
             )?.toMutableList() ?: return null
-            if (config.enableHoleFill) command += "--enable-hole-fill"
-            if (config.mergeNearbyRegions) command += "--merge-nearby-regions"
-            if (config.removeSmallRegions) command += "--remove-small-regions"
-            if (config.useManualBackground) command += "--use-manual-background"
             val process = PythonRuntime.configureProcess(
                 ProcessBuilder(command)
                 .directory(AppRuntimeFiles.pythonDir.parent.toFile())
@@ -118,13 +66,21 @@ internal object PythonDetectorBridge {
                 val width = bbox?.get("width")?.asInt() ?: region["width"]?.asInt() ?: return@mapIndexedNotNull null
                 val height = bbox?.get("height")?.asInt() ?: region["height"]?.asInt() ?: return@mapIndexedNotNull null
                 if (width <= 0 || height <= 0) return@mapIndexedNotNull null
+                val maskWidth = region["maskWidth"]?.asInt() ?: return@mapIndexedNotNull null
+                val maskHeight = region["maskHeight"]?.asInt() ?: return@mapIndexedNotNull null
+                val alphaMask = parseAlphaMask(region)
+                if (maskWidth <= 0 || maskHeight <= 0 || alphaMask.size != maskWidth * maskHeight || alphaMask.none { it > 0 }) {
+                    return@mapIndexedNotNull null
+                }
                 CropRegion(
                     id = (index + 1).toString(),
                     x = x,
                     y = y,
                     width = width,
                     height = height,
-                    points = parsePoints(region),
+                    maskWidth = maskWidth,
+                    maskHeight = maskHeight,
+                    alphaMask = alphaMask,
                     score = region["score"]?.asFloat()
                 )
             }
@@ -138,7 +94,8 @@ internal object PythonDetectorBridge {
                 connectedComponents = stats?.get("connectedComponents")?.asInt() ?: regions.size,
                 regionCount = stats?.get("regionCount")?.asInt() ?: regions.size,
                 backgroundSampleCount = stats?.get("backgroundSampleCount")?.asInt() ?: 0,
-                totalTimeMs = stats?.get("totalTimeMs")?.asLong() ?: 0L
+                totalTimeMs = stats?.get("totalTimeMs")?.asLong() ?: 0L,
+                backend = stats?.get("backend")?.asString().orEmpty()
             )
         )
     }
@@ -148,16 +105,15 @@ internal object PythonDetectorBridge {
         else -> DetectionMode.SOLID_BACKGROUND
     }
 
-    private fun parsePoints(region: JsonValue.JsonObject): List<RegionPoint> {
-        return region["points"]
+    private fun scoreThreshold(config: DetectionConfig): Float {
+        return (config.colorDistanceThreshold / 100.0f).coerceIn(0.05f, 0.95f)
+    }
+
+    private fun parseAlphaMask(region: JsonValue.JsonObject): List<Int> {
+        return region["alphaMask"]
             ?.asArray()
             ?.values
             .orEmpty()
-            .mapNotNull { value ->
-                val point = value.asObject() ?: return@mapNotNull null
-                val x = point["x"]?.asInt() ?: return@mapNotNull null
-                val y = point["y"]?.asInt() ?: return@mapNotNull null
-                RegionPoint(x, y)
-            }
+            .mapNotNull { it.asInt()?.coerceIn(0, 255) }
     }
 }

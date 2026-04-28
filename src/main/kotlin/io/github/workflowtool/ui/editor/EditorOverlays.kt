@@ -46,9 +46,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
-import io.github.workflowtool.application.MagicSelectionPreview
 import io.github.workflowtool.model.CropRegion
-import io.github.workflowtool.model.RegionPoint
 import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.ui.theme.Accent
 import io.github.workflowtool.ui.theme.Panel
@@ -85,7 +83,6 @@ private fun DrawScope.drawEyedropperIcon() {
 data class CanvasContextMenuState(
     val regionId: String?,
     val imagePoint: Offset,
-    val pointIndex: Int?,
     val visible: Boolean,
     val offset: IntOffset
 )
@@ -121,7 +118,7 @@ fun RegionNumberBadges(
             else -> 15.dp
         }
         val badgeColor = when {
-            selected -> Color(0xFF2F6BFF)
+            selected -> Color(0xFFF3A23C)
             hovered -> Color(0xFF3E79F0)
             else -> Accent.copy(alpha = 0.58f)
         }
@@ -178,21 +175,6 @@ fun CanvasContextMenu(
                 CanvasContextItem("选中区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, false) }
                 CanvasContextItem("聚焦区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, true) }
                 CanvasContextItem("预览区域", onDismiss = onDismiss) { onOpenRegionPreview(state.regionId) }
-                CanvasContextItem("添加角", onDismiss = onDismiss) {
-                    targetRegion?.let { region ->
-                        onCommit("添加选框角", latestRegions.replaceRegion(addRegionPoint(region, state.imagePoint, maxWidth, maxHeight)))
-                    }
-                }
-                if (targetRegion != null && state.pointIndex != null && targetRegion.editPoints.size > 3) {
-                    CanvasContextItem(
-                        "删除角",
-                        color = Color(0xFFFFB36A),
-                        onDismiss = onDismiss,
-                        onClick = {
-                            onCommit("删除选框角", latestRegions.replaceRegion(removeRegionPoint(targetRegion, state.pointIndex)))
-                        }
-                    )
-                }
                 CanvasContextItem(
                     regions.lastOrNull { it.id == state.regionId }?.let { if (it.visible) "隐藏区域" else "显示区域" } ?: "切换显示",
                     onDismiss = onDismiss

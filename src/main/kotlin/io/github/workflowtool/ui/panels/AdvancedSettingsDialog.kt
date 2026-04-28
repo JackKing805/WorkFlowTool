@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.AlertDialog
@@ -112,6 +111,17 @@ fun AdvancedSettingsDialog(controller: AppController) {
                 SmallCheck(strings.text(StringKey.OverwriteExisting), controller.overwriteExisting, controller::updateOverwriteExisting)
                 SmallCheck("持续学习训练集", controller.continuousTrainingEnabled, controller::updateContinuousTrainingEnabled)
                 Text("开启后，只有用户手动调整过选框并导出确认，才会将确认后的选框结果追加到训练集。", color = TextDim, fontSize = 12.sp)
+                GhostButton(
+                    "重建图标模型（本地训练样本）",
+                    controller::retrainSeedAndUserFeedbackModelAsync,
+                    modifier = Modifier.fillMaxWidth().height(36.dp),
+                    enabled = !controller.isBusy
+                )
+                Text(
+                    "会合并本地训练样本和用户确认过的 user_feedback，并重写 model/instance_segmentation 下的运行时模型。",
+                    color = TextDim,
+                    fontSize = 12.sp
+                )
                 Text("目录", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     GhostButton("运行目录", controller::openRuntimeDirectory, modifier = Modifier.weight(1f).height(36.dp))
@@ -137,4 +147,3 @@ fun AdvancedSettingsDialog(controller: AppController) {
         }
     )
 }
-

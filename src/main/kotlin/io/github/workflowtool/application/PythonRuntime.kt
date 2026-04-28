@@ -7,47 +7,68 @@ import kotlin.io.path.exists
 import kotlin.runCatching
 
 internal object PythonRuntime {
-    private val resolvedCommand: List<String>? by lazy {
-        candidateCommands().firstOrNull(::isCommandAvailable)
+    val venvDir: Path by lazy {
+        configuredPath("WORKFLOWTOOL_PYTHON_VENV") ?: AppRuntimeFiles.runtimeRoot.resolve("python-venv")
     }
 
+    val venvPython: Path
+        get() = if (isWindows()) {
+            venvDir.resolve("Scripts").resolve("python.exe")
+        } else {
+            venvDir.resolve("bin").resolve("python")
+        }
+
+    private val systemCommand: List<String>? by lazy {
+        candidateSystemCommands().firstOrNull(::isCommandAvailable)
+    }
+
+    val isSystemPythonAvailable: Boolean
+        get() = systemCommand != null
+
+    val isVenvAvailable: Boolean
+        get() = venvPython.exists() && isCommandAvailable(listOf(venvPython.absolutePathString()))
+
     val isAvailable: Boolean
-        get() = resolvedCommand != null
+        get() = isVenvAvailable || isSystemPythonAvailable
 
     fun status(scriptAvailable: Boolean, script: Path): String {
         return when {
             !scriptAvailable -> "python detector missing ($script)"
-            resolvedCommand != null -> "python: ${resolvedCommand!!.joinToString(" ")}; script: $script"
-            else -> "python interpreter missing (tried: ${attemptedCommands()}); script: $script"
+            isVenvAvailable -> "python venv: ${venvPython.absolutePathString()}; script: $script"
+            systemCommand != null -> "system python: ${systemCommand!!.joinToString(" ")}; venv pending: $venvDir; script: $script"
+            else -> "system python missing (tried: ${attemptedCommands()}); script: $script"
         }
     }
 
     fun buildCommand(args: List<String>): List<String>? {
-        return resolvedCommand?.plus(args)
+        return if (isVenvAvailable) {
+            listOf(venvPython.absolutePathString()) + args
+        } else {
+            null
+        }
+    }
+
+    fun buildSystemCommand(args: List<String>): List<String>? {
+        return systemCommand?.plus(args)
     }
 
     fun configureProcess(builder: ProcessBuilder): ProcessBuilder {
         val env = builder.environment()
         env["PYTHONNOUSERSITE"] = "1"
-        env["PIP_NO_INDEX"] = "1"
-        env["WORKFLOWTOOL_OFFLINE"] = "1"
-        env["WORKFLOWTOOL_DISABLE_NETWORK"] = "1"
+        env.remove("PIP_NO_INDEX")
+        env.remove("WORKFLOWTOOL_OFFLINE")
+        env.remove("WORKFLOWTOOL_DISABLE_NETWORK")
         return builder
     }
 
-    private fun candidateCommands(): List<List<String>> {
+    private fun candidateSystemCommands(): List<List<String>> {
         val configured = configuredCommand()
-        val bundled = bundledCommands()
-        val defaults = if (allowSystemPython()) {
-            if (isWindows()) {
-                listOf(listOf("py", "-3"), listOf("python"))
-            } else {
-                listOf(listOf("python3"), listOf("python"))
-            }
+        val defaults = if (isWindows()) {
+            listOf(listOf("py", "-3"), listOf("python"))
         } else {
-            emptyList()
+            listOf(listOf("python3"), listOf("python"))
         }
-        return (listOfNotNull(configured) + bundled + defaults)
+        return (listOfNotNull(configured) + defaults)
             .distinctBy { it.joinToString("\u0000") }
     }
 
@@ -59,58 +80,12 @@ internal object PythonRuntime {
         return raw.split(Regex("\\s+")).filter(String::isNotEmpty)
     }
 
-    private fun bundledCommands(): List<List<String>> {
-        return bundledExecutableCandidates().map { listOf(it.absolutePathString()) }
-    }
-
-    internal fun bundledExecutableCandidates(): List<Path> {
-        AppRuntimeFiles.prepareBundledDependencies()
-        return buildList {
-            bundledPythonRoots().forEach { root ->
-                pythonExecutableCandidates(root).forEach { candidate ->
-                    if (candidate.exists()) add(candidate)
-                }
-            }
-        }.distinct()
-    }
-
-    private fun bundledPythonRoots(): List<Path> {
-        val projectRoot = Path(System.getProperty("user.dir"))
-        val osDir = when {
-            isWindows() -> "windows"
-            isMac() -> "macos"
-            else -> "linux"
-        }
-        val generic = if (isWindows()) "win" else if (isMac()) "mac" else "linux"
-        return listOf(
-            AppRuntimeFiles.runtimeRoot.resolve("python-runtime"),
-            AppRuntimeFiles.runtimeRoot.resolve("third_party").resolve("python"),
-            AppRuntimeFiles.runtimeRoot.resolve("third_party").resolve("python").resolve(osDir),
-            AppRuntimeFiles.runtimeRoot.resolve("third_party").resolve("python").resolve(generic),
-            projectRoot.resolve("third_party").resolve("python"),
-            projectRoot.resolve("third_party").resolve("python").resolve(osDir),
-            projectRoot.resolve("third_party").resolve("python").resolve(generic),
-            projectRoot.resolve(".runtime").resolve("python")
-        ).distinct()
-    }
-
-    private fun pythonExecutableCandidates(root: Path): List<Path> {
-        return if (isWindows()) {
-            listOf(
-                root.resolve("python.exe"),
-                root.resolve("bin").resolve("python.exe"),
-                root.resolve("Scripts").resolve("python.exe")
-            )
-        } else {
-            listOf(
-                root.resolve("bin").resolve("python3"),
-                root.resolve("bin").resolve("python")
-            )
-        }
+    private fun configuredPath(name: String): Path? {
+        return System.getenv(name)?.trim()?.takeIf(String::isNotEmpty)?.let(::Path)
     }
 
     private fun attemptedCommands(): String {
-        return candidateCommands().joinToString(", ") { it.joinToString(" ") }
+        return candidateSystemCommands().joinToString(", ") { it.joinToString(" ") }
     }
 
     private fun isCommandAvailable(command: List<String>): Boolean {
@@ -127,23 +102,4 @@ internal object PythonRuntime {
     private fun isWindows(): Boolean {
         return System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
     }
-
-    private fun isMac(): Boolean {
-        return System.getProperty("os.name").startsWith("Mac", ignoreCase = true)
-    }
-
-    private fun allowSystemPython(): Boolean {
-        val configured = System.getenv("WORKFLOWTOOL_ALLOW_SYSTEM_PYTHON")
-            ?.trim()
-            ?.lowercase()
-        if (configured != null) return configured == "1" || configured == "true" || configured == "yes"
-        val disabled = System.getenv("WORKFLOWTOOL_DISABLE_SYSTEM_PYTHON")
-            ?.trim()
-            ?.lowercase()
-            ?.let { it == "1" || it == "true" || it == "yes" }
-            ?: false
-        return !disabled
-    }
-
-    internal fun systemFallbackEnabled(): Boolean = allowSystemPython()
 }

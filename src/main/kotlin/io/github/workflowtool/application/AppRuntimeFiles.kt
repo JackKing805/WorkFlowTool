@@ -19,16 +19,8 @@ internal object AppRuntimeFiles {
 
     val runtimeRoot: Path get() = appDataRoot
 
-    val thirdPartyRoot: Path
-        get() {
-            val target = appDataRoot.resolve("third_party")
-            installThirdPartyAssets(target)
-            return target
-        }
-
     val pythonDir: Path
         get() {
-            prepareBundledDependencies()
             val target = appDataRoot.resolve("python_detector")
             installPythonAssets(target)
             return target
@@ -38,13 +30,8 @@ internal object AppRuntimeFiles {
         installNativeLibrary()
     }
 
-    fun prepareBundledDependencies() {
-        installThirdPartyAssets(appDataRoot.resolve("third_party"))
-    }
-
     private fun installPythonAssets(target: Path) {
         Files.createDirectories(target)
-        val preserveUserModels = hasUserModelMarker(target)
         pythonAssets.forEach { relative ->
             when (pythonAssetPolicy(relative)) {
                 PythonAssetPolicy.Overwrite -> copyResource("python_detector/$relative", target.resolve(relative), overwrite = true)
@@ -53,19 +40,7 @@ internal object AppRuntimeFiles {
                     target.resolve(relative),
                     overwrite = false
                 )
-                PythonAssetPolicy.SeedModel -> {
-                    if (!preserveUserModels) {
-                        copyResource("python_detector/$relative", target.resolve(relative), overwrite = false)
-                    }
-                }
             }
-        }
-    }
-
-    private fun installThirdPartyAssets(target: Path) {
-        Files.createDirectories(target)
-        thirdPartyAssetList().forEach { relative ->
-            copyResource("third_party/$relative", target.resolve(relative), overwrite = false)
         }
     }
 
@@ -81,14 +56,18 @@ internal object AppRuntimeFiles {
         }
     }
 
-    private fun hasUserModelMarker(target: Path): Boolean {
-        return target.resolve("model").resolve("runtime-model-state.json").exists()
-    }
-
     fun clearCreatedFiles(): RuntimeCleanupResult {
         val targets = listOf(
-            appDataRoot.resolve("python_detector"),
-            appDataRoot.resolve("native")
+            appDataRoot.resolve("python-venv"),
+            appDataRoot.resolve("native"),
+            appDataRoot.resolve("python_detector").resolve("training_sets").resolve("combined"),
+            appDataRoot.resolve("python_detector").resolve("training_sets").resolve("recent_feedback"),
+            appDataRoot.resolve("python_detector").resolve("training_sets").resolve("magic_seed"),
+            appDataRoot.resolve("python_detector").resolve("training_sets").resolve("test_actions"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("instance_segmentation"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("combined"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("magic"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("runtime-model-state.json")
         )
         var deleted = 0
         val failures = mutableListOf<String>()
@@ -152,41 +131,34 @@ internal object AppRuntimeFiles {
     }
 
     fun offlineDependencyReport(): OfflineDependencyReport {
-        prepareBundledDependencies()
-        val pythonExecutables = PythonRuntime.bundledExecutableCandidates()
-        val wheelRoots = bundledWheelRoots()
-        val wheelFiles = wheelRoots.flatMap(::wheelArtifacts)
-        val modelFile = pythonDir.resolve("model").resolve("combined").resolve("model.json")
+        val requirementsFile = pythonDir.resolve("requirements.txt")
+        val modelFile = pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.onnx")
         val nativeProjectFile = projectRoot.resolve("native").resolve(nativeLibraryName())
         val nativeRuntimeFile = appDataRoot.resolve("native").resolve(nativeLibraryName())
         val nativePresent = nativeRuntimeFile.exists() || nativeProjectFile.exists() || nativeLibraryFile?.exists() == true
 
         val statuses = listOf(
             OfflineDependencyStatus(
-                name = "本地 Python",
-                ok = pythonExecutables.isNotEmpty(),
-                detail = if (pythonExecutables.isNotEmpty()) {
-                    pythonExecutables.joinToString(", ") { it.toString() }
+                name = "Python venv",
+                ok = PythonRuntime.isVenvAvailable,
+                detail = if (PythonRuntime.isVenvAvailable) {
+                    PythonRuntime.venvPython.toString()
                 } else {
-                    "未找到项目内 Python，可选目录：${bundledPythonRootsForReport().joinToString(", ")}"
+                    "venv not ready: ${PythonRuntime.venvDir}; system python available=${PythonRuntime.isSystemPythonAvailable}"
                 }
             ),
             OfflineDependencyStatus(
-                name = "离线 wheels/venv",
-                ok = wheelFiles.isNotEmpty(),
-                detail = if (wheelFiles.isNotEmpty()) {
-                    "${wheelFiles.size} 个离线包/环境文件，目录：${wheelRoots.filter { it.exists() }.joinToString(", ")}"
-                } else {
-                    "未找到 .whl 或 pyvenv.cfg，候选目录：${wheelRoots.joinToString(", ")}"
-                }
+                name = "PyPI requirements",
+                ok = requirementsFile.exists(),
+                detail = requirementsFile.toString()
             ),
             OfflineDependencyStatus(
-                name = "本地模型",
+                name = "runtime model",
                 ok = modelFile.exists(),
                 detail = modelFile.toString()
             ),
             OfflineDependencyStatus(
-                name = "本地原生库",
+                name = "native library",
                 ok = nativePresent,
                 detail = listOf(nativeRuntimeFile, nativeProjectFile).joinToString(", ")
             )
@@ -194,67 +166,11 @@ internal object AppRuntimeFiles {
         return OfflineDependencyReport(statuses)
     }
 
-    private fun bundledPythonRootsForReport(): List<Path> {
-        val osDir = platformDirectoryName()
-        val generic = platformDirectoryAlias()
-        return listOf(
-            thirdPartyRoot.resolve("python"),
-            projectRoot.resolve("third_party").resolve("python"),
-            projectRoot.resolve("third_party").resolve("python").resolve(osDir),
-            projectRoot.resolve("third_party").resolve("python").resolve(generic),
-            appDataRoot.resolve("python-runtime")
-        ).distinct()
-    }
-
-    private fun bundledWheelRoots(): List<Path> {
-        val osDir = platformDirectoryName()
-        val generic = platformDirectoryAlias()
-        return listOf(
-            thirdPartyRoot.resolve("wheels"),
-            thirdPartyRoot.resolve("wheels").resolve(osDir),
-            thirdPartyRoot.resolve("wheels").resolve(generic),
-            projectRoot.resolve("third_party").resolve("wheels"),
-            projectRoot.resolve("third_party").resolve("wheels").resolve(osDir),
-            projectRoot.resolve("third_party").resolve("wheels").resolve(generic)
-        ).distinct()
-    }
-
-    private fun wheelArtifacts(root: Path): List<Path> {
-        if (!root.exists()) return emptyList()
-        return runCatching {
-            Files.walk(root).use { stream ->
-                stream.filter {
-                    Files.isRegularFile(it) && (
-                        it.fileName.toString().endsWith(".whl", ignoreCase = true) ||
-                            it.fileName.toString().equals("pyvenv.cfg", ignoreCase = true)
-                        )
-                }.toList()
-            }
-        }.getOrDefault(emptyList())
-    }
-
-    private fun thirdPartyAssetList(): List<String> {
-        val manifestPath = "third_party/offline-assets.txt"
-        val projectManifest = projectRoot.resolve(manifestPath)
-        val manifestText = when {
-            projectManifest.exists() -> Files.readString(projectManifest, Charsets.UTF_8)
-            else -> AppRuntimeFiles::class.java.classLoader.getResourceAsStream(manifestPath)
-                ?.bufferedReader(Charsets.UTF_8)
-                ?.use { it.readText() }
-                .orEmpty()
-        }
-        return manifestText
-            .lineSequence()
-            .map(String::trim)
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .distinct()
-            .toList()
-    }
-
     private fun pythonAssetPolicy(relative: String): PythonAssetPolicy {
         return when {
-            relative.endsWith(".py") || relative == "README.md" -> PythonAssetPolicy.Overwrite
-            relative.startsWith("model/") -> PythonAssetPolicy.SeedModel
+            relative.endsWith(".py") || relative == "README.md" || relative == "requirements.txt" -> PythonAssetPolicy.Overwrite
+            relative.startsWith("training_sets/seed_pretrain/") -> PythonAssetPolicy.Overwrite
+            relative.startsWith("training_sets/background_seed/") -> PythonAssetPolicy.Overwrite
             else -> PythonAssetPolicy.CopyIfMissing
         }
     }
@@ -268,45 +184,22 @@ internal object AppRuntimeFiles {
         }
     }
 
-    private fun platformDirectoryName(): String {
-        val os = System.getProperty("os.name")
-        return when {
-            os.startsWith("Mac", ignoreCase = true) -> "macos"
-            os.startsWith("Windows", ignoreCase = true) -> "windows"
-            else -> "linux"
-        }
-    }
-
-    private fun platformDirectoryAlias(): String {
-        val os = System.getProperty("os.name")
-        return when {
-            os.startsWith("Mac", ignoreCase = true) -> "mac"
-            os.startsWith("Windows", ignoreCase = true) -> "win"
-            else -> "linux"
-        }
-    }
-
     private val pythonAssets = listOf(
         "offline_common.py",
+        "requirements.txt",
         "detect_icons.py",
         "make_training_set.py",
-        "bootstrap_seed_models.py",
         "train_icon_detector.py",
-        "train_magic_model.py",
         "train_background_model.py",
         "README.md",
-        "model/combined/model.json",
-        "model/background/model.json",
-        "model/magic/model.json",
-        "training_sets/test_actions/annotations.jsonl",
-        "training_sets/combined/annotations.jsonl",
         "training_sets/seed_pretrain/annotations.jsonl",
-        "training_sets/magic_seed/annotations.jsonl",
         "training_sets/background_seed/annotations.jsonl",
         "seed_images/test.png",
         "seed_images/icons.png",
-        "seed_images/icons2.png"
+        "seed_images/icons2.png",
+        "seed_images/icons3.png"
     )
+
 
     private fun writableAppDataRoot(): Path {
         val candidates = listOfNotNull(
@@ -344,12 +237,15 @@ internal data class OfflineDependencyReport(
     val okCount: Int get() = statuses.count { it.ok }
     val totalCount: Int get() = statuses.size
     val isHealthy: Boolean get() = statuses.all { it.ok }
+    val needsPythonRuntimePreparation: Boolean
+        get() = statuses.any { status ->
+            (status.name == "Python venv" || status.name == "runtime model") && !status.ok
+        }
 
     fun summary(): String = "离线依赖自检：$okCount/$totalCount 通过"
 }
 
 private enum class PythonAssetPolicy {
     Overwrite,
-    CopyIfMissing,
-    SeedModel
+    CopyIfMissing
 }

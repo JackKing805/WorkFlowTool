@@ -5,7 +5,8 @@ import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionMode
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
-import io.github.workflowtool.model.resolveRegionGroup
+import io.github.workflowtool.model.hasMask
+import io.github.workflowtool.model.maskAlphaAt
 import java.awt.Color
 import java.awt.image.BufferedImage
 import kotlin.test.Test
@@ -65,7 +66,7 @@ class DetectionPostProcessorTest {
     }
 
     @Test
-    fun detectsInteriorBackgroundCutoutAsHoleRegion() {
+    fun keepsInteriorBackgroundCutoutTransparentInMask() {
         val image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
         val background = Color(0x57, 0xD7, 0x45)
         val frame = Color(0x4A, 0x2B, 0x1E)
@@ -89,14 +90,56 @@ class DetectionPostProcessorTest {
             )
         )
 
-        assertEquals(2, result.regions.size)
-        val group = resolveRegionGroup(result.regions, "outer")
-        assertEquals("outer", group?.root?.id)
-        assertEquals(1, group?.holes?.size)
-        val hole = group!!.holes.first()
-        assertEquals(9, hole.x)
-        assertEquals(9, hole.y)
-        assertEquals(14, hole.width)
-        assertEquals(14, hole.height)
+        assertEquals(1, result.regions.size)
+        val region = result.regions.first()
+        assertEquals("outer", region.id)
+        assertTrue(region.hasMask())
+        assertEquals(0, region.maskAlphaAt(16, 16))
+        assertTrue(region.maskAlphaAt(7, 7) > 0)
+    }
+
+    @Test
+    fun preservesMaskFirstPayloadWithoutRecomputingFullBoxMask() {
+        val image = BufferedImage(24, 24, BufferedImage.TYPE_INT_ARGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color(0xF2, 0xF3, 0xF5)
+        graphics.fillRect(0, 0, 24, 24)
+        graphics.color = Color(0x23, 0x7A, 0xFF)
+        graphics.fillRect(6, 6, 8, 8)
+        graphics.dispose()
+
+        val suppliedMask = listOf(
+            255, 255, 255, 255,
+            255, 0, 0, 255,
+            255, 0, 0, 255,
+            255, 255, 255, 255
+        )
+        val result = postProcessDetection(
+            image = image,
+            config = DetectionConfig(minWidth = 2, minHeight = 2, minPixelArea = 4, bboxPadding = 0),
+            result = DetectionResult(
+                regions = listOf(
+                    CropRegion(
+                        id = "mask",
+                        x = 7,
+                        y = 7,
+                        width = 4,
+                        height = 4,
+                        maskWidth = 4,
+                        maskHeight = 4,
+                        alphaMask = suppliedMask
+                    )
+                ),
+                mode = DetectionMode.SOLID_BACKGROUND,
+                stats = DetectionStats(0xFFF2F3F5.toInt(), 16, 1, 1, 0, 1)
+            )
+        )
+
+        assertEquals(1, result.regions.size)
+        val region = result.regions.first()
+        assertTrue(region.hasMask())
+        assertEquals(0, region.maskAlphaAt(8, 8))
+        assertTrue(region.maskAlphaAt(7, 7) > 0)
+        assertTrue(region.maskAlphaAt(10, 10) > 0)
     }
 }

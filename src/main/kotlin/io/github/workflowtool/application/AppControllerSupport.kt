@@ -15,10 +15,9 @@ data class ProcessResult(val exitCode: Int, val output: String)
 
 data class ContinuousTrainingUpdate(
     val icon: Boolean,
-    val magic: Boolean,
     val background: Boolean
 ) {
-    val hasUpdates: Boolean get() = icon || magic || background
+    val hasUpdates: Boolean get() = icon || background
 }
 
 val supportedImageExtensions = setOf("png", "jpg", "jpeg", "webp", "bmp", "gif")
@@ -102,25 +101,10 @@ fun estimateCornerBackgroundArgb(image: BufferedImage): Int {
 
 fun buildTrainingJsonLine(imagePath: String, imageHash: String, regions: List<CropRegion>): String {
     val instances = regions.joinToString(",") { region ->
-        val points = region.editPoints.joinToString(",") { point ->
-            """{"x":${point.x},"y":${point.y}}"""
-        }
-        """{"bbox":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}},"points":[$points],"label":"icon"}"""
+        val mask = region.alphaMask.joinToString(",")
+        """{"bbox":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}},"maskWidth":${region.maskWidth},"maskHeight":${region.maskHeight},"alphaMask":[$mask],"label":"icon"}"""
     }
-    val boxes = regions.joinToString(",") { region ->
-        """{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}"""
-    }
-    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","instances":[$instances],"regions":[$boxes]}"""
-}
-
-fun buildMagicTrainingJsonLine(
-    imagePath: String,
-    seedX: Int,
-    seedY: Int,
-    tolerance: Int,
-    region: CropRegion
-): String {
-    return """{"image":"${escapeJson(imagePath)}","seedX":$seedX,"seedY":$seedY,"tolerance":$tolerance,"region":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}}}"""
+    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","instances":[$instances]}"""
 }
 
 fun sha256(value: String): String {

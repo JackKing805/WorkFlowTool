@@ -141,7 +141,17 @@ internal open class NativePoint() : Structure() {
     }
 }
 
-@Structure.FieldOrder("x", "y", "width", "height", "visible", "selected", "pointCount", "points", "score")
+@Structure.FieldOrder("pointCount", "points")
+internal open class NativeContour() : Structure() {
+    @JvmField var pointCount: Int = 0
+    @JvmField var points: Pointer? = null
+
+    constructor(memory: Pointer) : this() {
+        useMemory(memory)
+    }
+}
+
+@Structure.FieldOrder("x", "y", "width", "height", "visible", "selected", "pointCount", "points", "holeCount", "holes", "score")
 internal open class NativeRegion() : Structure() {
     @JvmField var x: Int = 0
     @JvmField var y: Int = 0
@@ -151,6 +161,8 @@ internal open class NativeRegion() : Structure() {
     @JvmField var selected: Byte = 0
     @JvmField var pointCount: Int = 0
     @JvmField var points: Pointer? = null
+    @JvmField var holeCount: Int = 0
+    @JvmField var holes: Pointer? = null
     @JvmField var score: Float = 0f
 
     constructor(memory: Pointer) : this() {
@@ -181,17 +193,4 @@ internal open class NativeDetectionResult() : Structure() {
     @JvmField var regionCount: Int = 0
     @JvmField var regions: Pointer? = null
     @JvmField var stats: NativeDetectionStats = NativeDetectionStats()
-}
-
-@Structure.FieldOrder("region", "mask", "maskLength", "imageWidth", "imageHeight", "seedX", "seedY", "pixelCount", "found")
-internal open class NativeMagicResult() : Structure() {
-    @JvmField var region: NativeRegion = NativeRegion()
-    @JvmField var mask: Pointer? = null
-    @JvmField var maskLength: Int = 0
-    @JvmField var imageWidth: Int = 0
-    @JvmField var imageHeight: Int = 0
-    @JvmField var seedX: Int = 0
-    @JvmField var seedY: Int = 0
-    @JvmField var pixelCount: Int = 0
-    @JvmField var found: Byte = 0
 }

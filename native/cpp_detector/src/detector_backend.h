@@ -57,6 +57,11 @@ struct NativePoint {
     int y;
 };
 
+struct NativeContour {
+    int pointCount;
+    NativePoint* points;
+};
+
 struct NativeRegion {
     int x;
     int y;
@@ -66,6 +71,8 @@ struct NativeRegion {
     std::uint8_t selected;
     int pointCount;
     NativePoint* points;
+    int holeCount;
+    NativeContour* holes;
     float score;
 };
 

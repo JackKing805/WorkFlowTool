@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.AlertDialog
@@ -109,12 +108,20 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         PanelCard(strings.text(StringKey.SelectImageTitle), Modifier.fillMaxWidth()) {
-            GhostButton(
-                "打开 ${strings.text(StringKey.OpenImage)}",
-                controller::chooseImageFile,
-                dashed = true,
-                modifier = Modifier.fillMaxWidth().height(35.dp)
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton(
+                    "打开 ${strings.text(StringKey.OpenImage)}",
+                    controller::chooseImageFile,
+                    dashed = true,
+                    modifier = Modifier.weight(1f).height(35.dp)
+                )
+                GhostButton(
+                    "历史记录",
+                    onClick = { controller.showHistoryDialog(true) },
+                    modifier = Modifier.width(104.dp).height(35.dp),
+                    enabled = controller.workspaceHistoryEntries.isNotEmpty()
+                )
+            }
             Spacer(Modifier.height(8.dp))
             ThumbnailBox(bitmap = remember(controller.image) { controller.image?.toComposeImageBitmap() })
             Spacer(Modifier.height(8.dp))
@@ -154,6 +161,16 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(12.dp))
             StatusLine(strings.text(StringKey.CurrentBaseSource), controller.baseSourceLabel)
             StatusLine(strings.text(StringKey.ManualEditsActive), controller.manualStatusLabel)
+            StatusLine("Python 运行时", controller.runtimeStatusLabel, multilineValue = true)
+            if (controller.runtimePreparationFailed) {
+                GhostButton(
+                    "重试准备运行环境",
+                    controller::preparePythonRuntimeAsync,
+                    enabled = !controller.isBusy,
+                    modifier = Modifier.fillMaxWidth().height(36.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+            }
             StatusLine(strings.text(StringKey.DetectionMode), controller.detectionModeLabel)
             StatusLine(strings.text(StringKey.DetectionBackend), controller.detectionBackendLabel, multilineValue = true)
             BackendWarning(controller)
@@ -202,31 +219,13 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
                 GhostButton(
-                    strings.text(StringKey.MagicTool),
-                    controller::enterMagicSelectionMode,
-                    active = controller.toolMode == ToolMode.Magic,
-                    enabled = controller.isGridSplitAvailable,
-                    modifier = Modifier.weight(1f).height(38.dp)
-                )
-                GhostButton(
                     strings.text(StringKey.ResetManualEdits),
                     controller::resetManualEdits,
                     modifier = Modifier.weight(1f).height(38.dp)
                 )
             }
-            if (controller.toolMode == ToolMode.Magic) {
-                CompactStepper(
-                    title = "魔棒容差",
-                    value = controller.magicTolerance,
-                    suffix = "",
-                    onDecrease = { controller.updateMagicTolerance(controller.magicTolerance - 2) },
-                    onIncrease = { controller.updateMagicTolerance(controller.magicTolerance + 2) }
-                )
-                StatusLine("魔棒像素", controller.magicSelectionPreview?.pixelCount?.toString() ?: "-")
-                StatusLine("魔棒种子", controller.magicSelectionPreview?.let { "${it.seedX}, ${it.seedY}" } ?: "-")
-            }
             Spacer(Modifier.height(8.dp))
-            Text("在预览区可以拖拽创建区域，或使用魔棒根据连通颜色块自动生成选区。", color = TextDim, fontSize = 12.sp)
+            Text("在预览区拖拽框选一个范围，松开后会自动识别范围内的图标区域。", color = TextDim, fontSize = 12.sp)
             SettingSwitch("合并相邻区域", "将相近且紧挨的候选区域合并。", controller.detectionConfig.mergeNearbyRegions) {
                 controller.updateDetectionConfig(controller.detectionConfig.copy(mergeNearbyRegions = it))
             }
@@ -283,7 +282,6 @@ private fun BackendWarning(controller: AppController) {
     val unavailableFeatures = buildList {
         if (!controller.isAutoDetectAvailable) add("自动识别")
         if (!controller.isGridSplitAvailable) add("智能网格")
-        if (!controller.isGridSplitAvailable) add("魔棒")
     }.joinToString("、")
     Column(
         Modifier.fillMaxWidth()

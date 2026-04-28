@@ -1,7 +1,6 @@
 ﻿package io.github.workflowtool.application
 
 import io.github.workflowtool.model.ExportConfig
-import io.github.workflowtool.platform.DesktopPlatform
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalDateTime
@@ -38,41 +37,6 @@ fun AppController.appendTrainingSample(sourceLabel: String): Boolean {
     }.getOrDefault(false)
 }
 
-fun AppController.appendMagicTrainingSample(sourceLabel: String): Boolean {
-    val loaded = image ?: return false
-    val preview = magicSelectionPreview ?: return false
-    val acceptedRegion = preview.regionId?.let { id -> regions.firstOrNull { it.id == id } } ?: return false
-    return runCatching {
-        val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("magic_feedback")
-        val imagesDir = datasetRoot.resolve("images")
-        Files.createDirectories(imagesDir)
-        val timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))
-        val sourceName = imageFile?.nameWithoutExtension.orEmpty().ifBlank { "canvas" }
-        val safeName = sourceName.replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_').ifBlank { "canvas" }
-        val targetName = "${timestamp}_${safeName}_magic.png"
-        val target = imagesDir.resolve(targetName)
-        check(ImageIO.write(loaded, "png", target.toFile())) { "魔棒训练样本图片写入失败" }
-        val line = buildMagicTrainingJsonLine(
-            imagePath = "images/$targetName",
-            seedX = preview.seedX,
-            seedY = preview.seedY,
-            tolerance = magicTolerance,
-            region = acceptedRegion
-        )
-        Files.writeString(
-            datasetRoot.resolve("annotations.jsonl"),
-            line + System.lineSeparator(),
-            Charsets.UTF_8,
-            java.nio.file.StandardOpenOption.CREATE,
-            java.nio.file.StandardOpenOption.APPEND
-        )
-        log("魔棒训练样本已记录：$sourceLabel")
-        true
-    }.onFailure {
-        log("魔棒训练样本记录失败：${it.message}")
-    }.getOrDefault(false)
-}
-
 fun AppController.appendBackgroundTrainingSample(sourceLabel: String): Boolean {
     val loaded = image ?: return false
     val background = sampledBackgroundArgb ?: return false
@@ -95,6 +59,30 @@ fun AppController.appendBackgroundTrainingSample(sourceLabel: String): Boolean {
     }.getOrDefault(false)
 }
 
+fun AppController.retrainSeedAndUserFeedbackModelAsync() {
+    runBusy("正在根据本地训练样本重建图标模型...") {
+        retrainSeedAndUserFeedbackModel()
+    }
+}
+
+fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
+    return runCatching {
+        setTrainingBusyMessage("正在合并本地训练样本...")
+        val makeDataset = runPythonCommand("make_training_set.py")
+        check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
+
+        trainAndPromoteIconModel(
+            dataset = "training_sets/combined",
+            epochs = "4",
+            batch = "2"
+        )
+        log("图标模型已根据本地训练样本重建")
+        true
+    }.onFailure {
+        log("图标模型重建失败：${it.message}")
+    }.getOrDefault(false)
+}
+
 fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boolean {
     return runCatching {
         setTrainingBusyMessage("正在用本次结果更新模型...")
@@ -102,43 +90,23 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
             val makeDataset = runPythonCommand("make_training_set.py")
             check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
             val recentManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("recent_feedback").resolve("annotations.jsonl")
+            var iconModelUpdated = false
             if (shouldRunFullIconRetrain()) {
-                val trainCombined = runPythonCommand(
-                    "train_icon_detector.py",
-                    "--dataset",
-                    "training_sets/combined",
-                    "--out",
-                    "model/combined",
-                    "--epochs",
-                    "4",
-                    "--imgsz",
-                    "512",
-                    "--batch",
-                    "2"
+                iconModelUpdated = trainAndPromoteIconModel(
+                    dataset = "training_sets/combined",
+                    epochs = "4",
+                    batch = "2"
                 )
-                check(trainCombined.exitCode == 0) { trainCombined.output.ifBlank { "模型训练失败" } }
-                log("图标模型已执行全量稳态训练")
             }
             if (recentManifest.exists()) {
-                val trainRecent = runPythonCommand(
-                    "train_icon_detector.py",
-                    "--dataset",
-                    "training_sets/recent_feedback",
-                    "--out",
-                    "model/combined",
-                    "--epochs",
-                    "2",
-                    "--imgsz",
-                    "512",
-                    "--batch",
-                    "1"
+                iconModelUpdated = trainAndPromoteIconModel(
+                    dataset = "training_sets/recent_feedback",
+                    epochs = "2",
+                    batch = "1"
                 )
-                check(trainRecent.exitCode == 0) { trainRecent.output.ifBlank { "最近样本微调失败" } }
-                log("图标模型已执行最近样本快速微调")
             }
-            AppRuntimeFiles.markUserModelUpdated()
+            if (iconModelUpdated) AppRuntimeFiles.markUserModelUpdated()
         }
-        if (update.magic) trainMagicModelIfNeeded()
         if (update.background) trainBackgroundModelIfNeeded()
         log("持续学习模型已更新，下次识别会使用新模型")
         true
@@ -147,15 +115,30 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
     }.getOrDefault(false)
 }
 
-fun AppController.trainMagicModelIfNeeded() {
-    val samples = AppRuntimeFiles.pythonDir
-        .resolve("training_sets")
-        .resolve("magic_feedback")
-        .resolve("annotations.jsonl")
-    if (!samples.exists()) return
-    val train = runPythonCommand("train_magic_model.py")
-    check(train.exitCode == 0) { train.output.ifBlank { "魔棒模型训练失败" } }
-    MagicToleranceModel.invalidate()
+fun AppController.trainAndPromoteIconModel(
+    dataset: String,
+    epochs: String,
+    batch: String
+): Boolean {
+    setTrainingBusyMessage("正在训练图标模型...")
+    val train = runPythonCommand(
+        "train_icon_detector.py",
+        "--dataset",
+        dataset,
+        "--out",
+        "model/instance_segmentation",
+        "--epochs",
+        epochs,
+        "--imgsz",
+        "512",
+        "--batch",
+        batch
+    )
+    check(train.exitCode == 0) { train.output.ifBlank { "图标模型训练失败" } }
+
+    AppRuntimeFiles.markUserModelUpdated()
+    log("图标模型已更新：$dataset")
+    return true
 }
 
 fun AppController.trainBackgroundModelIfNeeded() {
@@ -170,7 +153,7 @@ fun AppController.trainBackgroundModelIfNeeded() {
 }
 
 fun shouldRunFullIconRetrain(): Boolean {
-    val modelManifest = AppRuntimeFiles.pythonDir.resolve("model").resolve("combined").resolve("model.json")
+    val modelManifest = AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.json")
     if (!modelManifest.exists()) return true
     val feedbackManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
     if (!feedbackManifest.exists()) return false
@@ -189,11 +172,11 @@ fun AppController.buildTrainingFingerprint(config: ExportConfig): String {
                     .append(region.width).append(',').append(region.height).append(',')
                     .append(region.visible)
                 append(':')
-                append(region.points.joinToString(";") { "${it.x},${it.y}" })
+                append(region.maskWidth).append('x').append(region.maskHeight).append(':')
+                append(region.alphaMask.joinToString(","))
             }
         }).append('\n')
         append("sampledBackground=").append(sampledBackgroundArgb ?: "auto").append('\n')
-        append("magic=").append(magicSelectionPreview?.let { "${it.seedX},${it.seedY},$magicTolerance,${it.regionId}" } ?: "none").append('\n')
         append("format=").append(config.outputFormat).append('\n')
         append("keepOriginalSize=").append(config.keepOriginalSize).append('\n')
         append("trimTransparentPadding=").append(config.trimTransparentPadding).append('\n')
@@ -244,8 +227,12 @@ fun trainingFingerprintFile(): Path {
 }
 
 fun runPythonCommand(vararg args: String): ProcessResult {
+    val environment = PythonEnvironmentManager.ensureReady()
+    if (!environment.ready) {
+        return ProcessResult(127, environment.message)
+    }
     val command = PythonRuntime.buildCommand(args.toList())
-        ?: return ProcessResult(127, "Python interpreter not found. Bundled offline runtime is required unless WORKFLOWTOOL_ALLOW_SYSTEM_PYTHON is enabled.")
+        ?: return ProcessResult(127, "Python virtual environment is not ready.")
     val process = PythonRuntime.configureProcess(
         ProcessBuilder(command)
             .directory(AppRuntimeFiles.pythonDir.toFile())

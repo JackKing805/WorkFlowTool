@@ -3,7 +3,6 @@ package io.github.workflowtool.core
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.NamingMode
-import io.github.workflowtool.model.RegionPoint
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.nio.file.Files
@@ -40,122 +39,28 @@ class IconExporterTest {
     }
 
     @Test
-    fun exportsOnlyPixelsInsidePolygonRegion() {
-        val image = BufferedImage(12, 12, BufferedImage.TYPE_INT_ARGB)
+    fun previewCropUsesAlphaMaskAsSourceOfTruth() {
+        val image = BufferedImage(6, 6, BufferedImage.TYPE_INT_ARGB)
         val graphics = image.createGraphics()
         graphics.color = Color.RED
-        graphics.fillRect(0, 0, 12, 12)
+        graphics.fillRect(0, 0, 6, 6)
         graphics.dispose()
-        val output = Files.createTempDirectory("icon-export-polygon-test")
-
-        val result = IconExporter().export(
-            image = image,
-            sourceFileName = "icons.png",
-            regions = listOf(
-                CropRegion(
-                    id = "1",
-                    x = 2,
-                    y = 2,
-                    width = 8,
-                    height = 8,
-                    points = listOf(
-                        RegionPoint(2, 2),
-                        RegionPoint(10, 2),
-                        RegionPoint(2, 10)
-                    )
-                )
-            ),
-            config = ExportConfig(
-                outputDirectory = output,
-                namingMode = NamingMode.Sequence,
-                overwriteExisting = true
-            )
+        val region = CropRegion(
+            id = "mask",
+            x = 1,
+            y = 1,
+            width = 4,
+            height = 4,
+            maskWidth = 4,
+            maskHeight = 4,
+            alphaMask = List(16) { index -> if (index % 5 == 0) 255 else 0 }
         )
 
-        assertEquals(1, result.successCount)
-        val exported = ImageIO.read(output.resolve("001.png").toFile())
-        assertEquals(8, exported.width)
-        assertEquals(8, exported.height)
-        assertEquals(0, exported.getRGB(7, 7) ushr 24)
-        assertEquals(255, exported.getRGB(1, 1) ushr 24)
-    }
+        val cropped = IconExporter().cropPreview(image, region)
 
-    @Test
-    fun previewCropUsesPolygonShape() {
-        val image = BufferedImage(12, 12, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color.RED
-        graphics.fillRect(0, 0, 12, 12)
-        graphics.dispose()
-
-        val cropped = IconExporter().cropPreview(
-            image,
-            CropRegion(
-                id = "1",
-                x = 2,
-                y = 2,
-                width = 8,
-                height = 8,
-                points = listOf(
-                    RegionPoint(2, 2),
-                    RegionPoint(10, 2),
-                    RegionPoint(2, 10)
-                )
-            )
-        )
-
-        assertEquals(8, cropped.width)
-        assertEquals(8, cropped.height)
-        assertEquals(0, cropped.getRGB(7, 7) ushr 24)
-        assertEquals(255, cropped.getRGB(1, 1) ushr 24)
-    }
-
-    @Test
-    fun previewCropKeepsSoftEdgeOnDiagonalPolygon() {
-        val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color.RED
-        graphics.fillRect(0, 0, 20, 20)
-        graphics.dispose()
-
-        val cropped = IconExporter().cropPreview(
-            image,
-            CropRegion(
-                id = "1",
-                x = 2,
-                y = 2,
-                width = 16,
-                height = 16,
-                points = listOf(
-                    RegionPoint(2, 2),
-                    RegionPoint(18, 6),
-                    RegionPoint(14, 18),
-                    RegionPoint(2, 14)
-                )
-            )
-        )
-
-        val edgeAlpha = cropped.getRGB(15, 3) ushr 24
-        assertTrue(edgeAlpha in 1..254)
-    }
-
-    @Test
-    fun previewCropSubtractsContainedHoleWhenGroupRegionsProvided() {
-        val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color.RED
-        graphics.fillRect(0, 0, 20, 20)
-        graphics.dispose()
-
-        val outer = CropRegion("outer", 2, 2, 16, 16)
-        val hole = CropRegion("hole", 7, 7, 4, 4)
-
-        val cropped = IconExporter().cropPreview(image, hole, listOf(outer, hole))
-
-        assertEquals(16, cropped.width)
-        assertEquals(16, cropped.height)
-        assertEquals(255, cropped.getRGB(1, 1) ushr 24)
-        assertEquals(0, cropped.getRGB(6, 6) ushr 24)
+        assertEquals(4, cropped.width)
+        assertEquals(255, cropped.getRGB(0, 0) ushr 24)
+        assertEquals(0, cropped.getRGB(1, 0) ushr 24)
     }
 
     @Test

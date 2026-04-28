@@ -64,7 +64,7 @@ class NativeDetectorBridgeTest {
     }
 
     @Test
-    fun mapsNativePolygonPointsIntoDomainResult() {
+    fun ignoresNativePolygonCompatibilityFields() {
         val regionSize = NativeRegion().size()
         val pointSize = NativePoint().size()
         val regionMemory = Memory(regionSize.toLong())
@@ -102,9 +102,8 @@ class NativeDetectorBridgeTest {
         val result = nativeResult.toDomainResult()
 
         assertEquals(1, result.regions.size)
-        assertEquals(4, result.regions.first().points.size)
-        assertEquals(16, result.regions.first().points[1].x)
-        assertEquals(20, result.regions.first().points[2].y)
+        assertEquals(4, result.regions.first().x)
+        assertEquals(12, result.regions.first().width)
         assertEquals(0.91f, result.regions.first().score)
     }
 
@@ -140,34 +139,6 @@ class NativeDetectorBridgeTest {
     }
 
     @Test
-    fun cppBridgeDetectsMagicSelectionWhenLibraryIsPresent() {
-        if (!CppDetectorBridge.isLoaded) return
-
-        val image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
-        val graphics = image.createGraphics()
-        graphics.color = Color(0xF3, 0xF4, 0xF6)
-        graphics.fillRect(0, 0, 32, 32)
-        graphics.color = Color(0x23, 0x7A, 0xFF)
-        graphics.fillRect(5, 5, 10, 10)
-        graphics.dispose()
-
-        val result = CppDetectorBridge.detectMagicRegion(
-            image,
-            7,
-            7,
-            DetectionConfig(minWidth = 4, minHeight = 4, minPixelArea = 8, bboxPadding = 0)
-        )
-
-        assertNotNull(result)
-        assertEquals(5, result.region.x)
-        assertEquals(5, result.region.y)
-        assertEquals(10, result.region.width)
-        assertEquals(10, result.region.height)
-        assertEquals(32 * 32, result.mask.size)
-        assertTrue(result.pixelCount >= 100)
-    }
-
-    @Test
     fun cppBridgeUsesManualBackgroundWhenProvided() {
         if (!CppDetectorBridge.isLoaded) return
 
@@ -197,43 +168,4 @@ class NativeDetectorBridgeTest {
         assertEquals(6, result.regions.first().x)
     }
 
-    @Test
-    fun cppBridgeMergesMagicMasksWhenLibraryIsPresent() {
-        if (!CppDetectorBridge.isLoaded) return
-
-        val currentMask = BooleanArray(25)
-        currentMask[1 * 5 + 1] = true
-        val addedMask = BooleanArray(25)
-        addedMask[3 * 5 + 3] = true
-
-        val current = MagicSelectionPreview(
-            seedX = 1,
-            seedY = 1,
-            regionId = "1",
-            mask = currentMask,
-            imageWidth = 5,
-            imageHeight = 5,
-            pixelCount = 1
-        )
-        val added = MagicSelectionResult(
-            region = io.github.workflowtool.model.CropRegion("2", 3, 3, 1, 1),
-            mask = addedMask,
-            imageWidth = 5,
-            imageHeight = 5,
-            seedX = 3,
-            seedY = 3,
-            pixelCount = 1
-        )
-
-        assertFalse(CppDetectorBridge.magicMaskContains(current.mask, 5, 5, 3, 3))
-        val merged = CppDetectorBridge.mergeMagicMasks(current, added, bboxPadding = 0)
-
-        assertNotNull(merged)
-        assertEquals(2, merged.pixelCount)
-        assertEquals(1, merged.region.x)
-        assertEquals(1, merged.region.y)
-        assertEquals(3, merged.region.width)
-        assertEquals(3, merged.region.height)
-        assertTrue(CppDetectorBridge.magicMaskContains(merged.mask, 5, 5, 3, 3))
-    }
 }
