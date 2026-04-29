@@ -182,7 +182,7 @@ internal fun constrainedRefineUserRegion(
     val overlapThreshold = (1.0 - config.manualRefineConflictTolerance).coerceIn(0.05, 0.95)
     val resolvedCandidate = when {
         preferredCandidate == null -> fallbackCandidate
-        overlapRatio(region, preferredCandidate) >= overlapThreshold -> preferredCandidate
+        manualRefineOverlapRatio(region, preferredCandidate) >= overlapThreshold -> preferredCandidate
         else -> fallbackCandidate?.let {
             normalizeManualRefineCandidate(it, image, config, backgroundArgb, mode)
         }
@@ -297,7 +297,7 @@ private fun normalizeManualRefineCandidate(
 private fun hasLockedNegativeMask(region: CropRegion): Boolean =
     region.hasMask() && region.alphaMask.any { it <= 0 }
 
-private fun overlapRatio(user: CropRegion, candidate: CropRegion): Double {
+internal fun manualRefineOverlapRatio(user: CropRegion, candidate: CropRegion): Double {
     val left = min(user.x, candidate.x)
     val top = min(user.y, candidate.y)
     val right = max(user.right, candidate.right)

@@ -31,8 +31,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed as isKeyAltPressed
 import androidx.compose.ui.input.key.isShiftPressed as isKeyShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -77,8 +82,6 @@ private data class DragSession(
     val usedAddBrush: Boolean = false
 )
 
-private fun selectionBrushRadius(zoom: Float): Int = (18f / zoom.coerceAtLeast(0.25f)).roundToInt().coerceIn(4, 48)
-
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun EditorCanvas(
@@ -92,6 +95,7 @@ fun EditorCanvas(
     showGrid: Boolean,
     toolMode: ToolMode,
     backgroundPickArmed: Boolean,
+    refineBrushSizePx: Int,
     onViewport: (Size) -> Unit,
     onPan: (Offset) -> Unit,
     onZoom: (Float, Offset, Offset) -> Unit,
@@ -103,12 +107,16 @@ fun EditorCanvas(
     onHover: (Offset?) -> Unit,
     onClearSelection: () -> Unit,
     onDeleteRegion: (String) -> Unit,
+    onDeleteSelectedRegions: () -> Unit,
     onToggleRegionVisibility: (String) -> Unit,
+    onToggleSelectedVisibility: () -> Unit,
     onFocusRegion: (String, Boolean) -> Unit,
     onOpenRegionPreview: (String) -> Unit,
     onMergeSelectedRegions: () -> Unit,
     onFitToViewport: () -> Unit,
-    onClearRegions: () -> Unit
+    onClearRegions: () -> Unit,
+    onIncreaseRefineBrushSize: () -> Unit,
+    onDecreaseRefineBrushSize: () -> Unit
 ) {
     var dragSession by remember { mutableStateOf<DragSession?>(null) }
     var workingRegions by remember { mutableStateOf<List<CropRegion>?>(null) }
@@ -120,6 +128,7 @@ fun EditorCanvas(
     var selectionEditMode by remember { mutableStateOf(MaskEditMode.Replace) }
     var ctrlPressed by remember { mutableStateOf(false) }
     var shiftPressed by remember { mutableStateOf(false) }
+    var altPressed by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val maskGeometryCache = remember { MaskOverlayGeometryCache() }
     val latestRegions by rememberUpdatedState(regions)
@@ -156,8 +165,21 @@ fun EditorCanvas(
             .focusRequester(focusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) {
+                    when (event.key) {
+                        Key.LeftBracket -> {
+                            onDecreaseRefineBrushSize()
+                            return@onPreviewKeyEvent true
+                        }
+                        Key.RightBracket -> {
+                            onIncreaseRefineBrushSize()
+                            return@onPreviewKeyEvent true
+                        }
+                    }
+                }
                 selectionEditMode = maskEditModeForModifiers(event.isKeyAltPressed, event.isKeyShiftPressed)
                 shiftPressed = event.isKeyShiftPressed
+                altPressed = event.isKeyAltPressed
                 false
             }
             .pointerHoverIcon(
@@ -168,6 +190,7 @@ fun EditorCanvas(
                 focusRequester.requestFocus()
                 ctrlPressed = isPrimaryShortcutPressed(event.keyboardModifiers)
                 shiftPressed = event.keyboardModifiers.isShiftPressed
+                altPressed = event.keyboardModifiers.isAltPressed
                 val change = event.changes.firstOrNull() ?: return@onPointerEvent
                 if (latestBackgroundPickArmed && event.buttons.isPrimaryPressed) {
                     change.consume()
@@ -176,10 +199,7 @@ fun EditorCanvas(
                     return@onPointerEvent
                 }
                 if (event.buttons.isPrimaryPressed) {
-                    if (isPrimaryShortcutPressed(event.keyboardModifiers)) {
-                        contextMenu = null
-                        return@onPointerEvent
-                    }
+                    contextMenu = null
                     selectionEditMode = maskEditModeForModifiers(
                         event.keyboardModifiers.isAltPressed,
                         event.keyboardModifiers.isShiftPressed
@@ -242,6 +262,7 @@ fun EditorCanvas(
                                 if (hoveredRegionId != hit.id) hoveredRegionId = hit.id
                                 return@detectTapGestures
                             }
+                            if (ctrlPressed || shiftPressed || altPressed) return@detectTapGestures
                             onClearSelection()
                         }
                     )
@@ -249,6 +270,7 @@ fun EditorCanvas(
                 .onPointerEvent(PointerEventType.Move) { event ->
                     ctrlPressed = isPrimaryShortcutPressed(event.keyboardModifiers)
                     shiftPressed = event.keyboardModifiers.isShiftPressed
+                    altPressed = event.keyboardModifiers.isAltPressed
                     val point = event.changes.firstOrNull()?.position ?: return@onPointerEvent
                     selectionEditMode = maskEditModeForModifiers(
                         event.keyboardModifiers.isAltPressed,
@@ -283,6 +305,28 @@ fun EditorCanvas(
                             val hit = hitTarget?.region
                             contextMenu = null
                             when {
+                                latestToolMode == ToolMode.Move -> {
+                                    dragSession = DragSession(DragKind.Pan, null, latestRegions, offset)
+                                    workingRegions = null
+                                }
+                                hit != null -> {
+                                    val active = hit
+                                    if (hoveredRegionId != active.id) hoveredRegionId = active.id
+                                    val base = latestRegions.map {
+                                        if (it.id == active.id) it.copy(selected = true) else if (!it.selected) it else it.copy(selected = false)
+                                    }
+                                    dragSession = DragSession(
+                                        DragKind.RegionEdit,
+                                        active.id,
+                                        base,
+                                        imagePoint,
+                                        editableRegion = canRefineHitRegion(latestToolMode)
+                                    )
+                                    workingRegions = base
+                                    if (!active.selected || latestRegions.any { it.id != active.id && it.selected }) {
+                                        onSelect(active.id, false)
+                                    }
+                                }
                                 latestToolMode != ToolMode.Eyedropper && ctrlPressed -> {
                                     dragSession = DragSession(
                                         DragKind.MarqueeSelect,
@@ -293,29 +337,6 @@ fun EditorCanvas(
                                     )
                                     marqueeSelection = imagePoint to imagePoint
                                     workingRegions = latestRegions
-                                }
-                                latestToolMode == ToolMode.Move -> {
-                                    dragSession = DragSession(DragKind.Pan, null, latestRegions, offset)
-                                    workingRegions = null
-                                }
-                                hit != null -> {
-                                    val active = hit
-                                    val alreadyActivated = active.selected
-                                    if (hoveredRegionId != active.id) hoveredRegionId = active.id
-                                    val base = latestRegions.map {
-                                        if (it.id == active.id) it.copy(selected = true) else if (!it.selected) it else it.copy(selected = false)
-                                    }
-                                    dragSession = DragSession(
-                                        DragKind.RegionEdit,
-                                        active.id,
-                                        base,
-                                        imagePoint,
-                                        editableRegion = canRefineHitRegion(latestToolMode, alreadyActivated)
-                                    )
-                                    workingRegions = base
-                                    if (!active.selected || latestRegions.any { it.id != active.id && it.selected }) {
-                                        onSelect(active.id, false)
-                                    }
                                 }
                                 latestToolMode != ToolMode.Draw -> {
                                     dragSession = DragSession(DragKind.Pan, null, latestRegions, offset)
@@ -350,7 +371,7 @@ fun EditorCanvas(
                                                 editSelectionMask(
                                                     it,
                                                     current,
-                                                    selectionBrushRadius(latestTransform.renderZoomX),
+                                                    selectionBrushRadius(refineBrushSizePx, latestTransform.renderZoomX),
                                                     liveEditMode,
                                                     maxWidth,
                                                     maxHeight
@@ -383,7 +404,7 @@ fun EditorCanvas(
                                     val current = latestTransform.screenToImage(change.position)
                                     val next = (workingRegions ?: session.baseRegions).map {
                                         if (it.id == session.regionId) {
-                                            editSelectionMask(it, current, selectionBrushRadius(latestTransform.renderZoomX), liveEditMode, maxWidth, maxHeight)
+                                            editSelectionMask(it, current, selectionBrushRadius(refineBrushSizePx, latestTransform.renderZoomX), liveEditMode, maxWidth, maxHeight)
                                         } else {
                                             it
                                         }
@@ -478,6 +499,31 @@ fun EditorCanvas(
                     maskGeometryCache = maskGeometryCache
                 )
             }
+            pointerPosition?.let { pointer ->
+                val mode = selectionEditMode
+                if (mode != MaskEditMode.Replace && canRefineHitRegion(latestToolMode)) {
+                    val imagePoint = viewportTransform.screenToImage(pointer)
+                    if (findRegionHit(renderedRegions, imagePoint) != null) {
+                        val radius = selectionBrushRadius(refineBrushSizePx, renderZoomX) * renderZoomX
+                        val color = when (mode) {
+                            MaskEditMode.Add -> Color(0xFF4A8CFF)
+                            MaskEditMode.Subtract -> Color(0xFFFF6C63)
+                            MaskEditMode.Replace -> Color.Transparent
+                        }
+                        drawCircle(
+                            color = color.copy(alpha = 0.18f),
+                            radius = radius,
+                            center = pointer
+                        )
+                        drawCircle(
+                            color = color.copy(alpha = 0.82f),
+                            radius = radius,
+                            center = pointer,
+                            style = Stroke(width = 1.4f)
+                        )
+                    }
+                }
+            }
             marqueeSelection?.let { (start, end) ->
                 val left = minOf(start.x, end.x) * renderZoomX + renderOffset.x
                 val top = minOf(start.y, end.y) * renderZoomY + renderOffset.y
@@ -509,7 +555,9 @@ fun EditorCanvas(
                 regions = regions,
                 onDismiss = { contextMenu = null },
                 onDeleteRegion = onDeleteRegion,
+                onDeleteSelectedRegions = onDeleteSelectedRegions,
                 onToggleRegionVisibility = onToggleRegionVisibility,
+                onToggleSelectedVisibility = onToggleSelectedVisibility,
                 onFocusRegion = onFocusRegion,
                 onOpenRegionPreview = onOpenRegionPreview,
                 onMergeSelectedRegions = onMergeSelectedRegions,

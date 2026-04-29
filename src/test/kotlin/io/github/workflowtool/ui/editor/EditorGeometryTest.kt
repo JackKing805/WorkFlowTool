@@ -82,6 +82,14 @@ class EditorGeometryTest {
     }
 
     @Test
+    fun selectionBrushRadiusUsesScreenSizeAcrossZoomLevels() {
+        assertEquals(18, selectionBrushRadius(18, zoom = 1f))
+        assertEquals(9, selectionBrushRadius(18, zoom = 2f))
+        assertEquals(36, selectionBrushRadius(18, zoom = 0.5f))
+        assertEquals(4, selectionBrushRadius(1, zoom = 4f))
+    }
+
+    @Test
     fun imageSelectionBoundsNormalizeAndClampDragCorners() {
         val bounds = imageSelectionBounds(
             start = Offset(25.4f, -4.2f),
@@ -99,10 +107,11 @@ class EditorGeometryTest {
     }
 
     @Test
-    fun refinementRequiresActivatedSelectedRegion() {
-        assertFalse(canRefineHitRegion(ToolMode.Select, regionAlreadySelected = false))
-        assertTrue(canRefineHitRegion(ToolMode.Select, regionAlreadySelected = true))
-        assertFalse(canRefineHitRegion(ToolMode.Move, regionAlreadySelected = true))
+    fun refinementRequiresHitRegionOutsideMoveTool() {
+        assertTrue(canRefineHitRegion(ToolMode.Select))
+        assertTrue(canRefineHitRegion(ToolMode.Draw))
+        assertTrue(canRefineHitRegion(ToolMode.Eyedropper))
+        assertFalse(canRefineHitRegion(ToolMode.Move))
     }
 
     @Test

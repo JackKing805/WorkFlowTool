@@ -46,6 +46,9 @@ fun AppController.replaceRegions(label: String, updated: List<CropRegion>, track
         }
         if (label == "整体贴合选区") {
             log("选区已按用户精修结果补全并贴合")
+            if (trackHistory) {
+                recordFineRefineFeedbackAsync()
+            }
         } else if (label == "贴合新增区域") {
             log("新增区域已自动贴合图标边缘")
         }
@@ -172,6 +175,16 @@ fun AppController.removeRegion(regionId: String) {
     }
 }
 
+fun AppController.removeSelectedRegions() {
+    val selectedIds = regions.filter { it.selected }.map { it.id }.toSet()
+    if (selectedIds.isEmpty()) return
+    replaceRegions("删除选中区域", regions.filterNot { it.id in selectedIds })
+    if (previewRegionId in selectedIds) {
+        previewRegionId = null
+    }
+    log("已删除 ${selectedIds.size} 个选中区域")
+}
+
 fun AppController.toggleVisibility(regionId: String) {
     if (regions.none { it.id == regionId }) return
     val shouldShow = regions.any { it.id == regionId && !it.visible }
@@ -179,4 +192,18 @@ fun AppController.toggleVisibility(regionId: String) {
         "切换区域显示",
         regions.map { if (it.id == regionId) it.copy(visible = shouldShow) else it }
     )
+}
+
+fun AppController.toggleSelectedVisibility() {
+    val selected = regions.filter { it.selected }
+    if (selected.isEmpty()) return
+    val selectedIds = selected.map { it.id }.toSet()
+    val shouldShow = selected.none { it.visible }
+    replaceRegions(
+        if (shouldShow) "显示选中区域" else "隐藏选中区域",
+        regions.map { region ->
+            if (region.id in selectedIds) region.copy(visible = shouldShow) else region
+        }
+    )
+    log(if (shouldShow) "已显示 ${selected.size} 个选中区域" else "已隐藏 ${selected.size} 个选中区域")
 }

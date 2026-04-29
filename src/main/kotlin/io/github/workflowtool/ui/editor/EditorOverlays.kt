@@ -123,7 +123,9 @@ fun CanvasContextMenu(
     regions: List<CropRegion>,
     onDismiss: () -> Unit,
     onDeleteRegion: (String) -> Unit,
+    onDeleteSelectedRegions: () -> Unit,
     onToggleRegionVisibility: (String) -> Unit,
+    onToggleSelectedVisibility: () -> Unit,
     onFocusRegion: (String, Boolean) -> Unit,
     onOpenRegionPreview: (String) -> Unit,
     onMergeSelectedRegions: () -> Unit,
@@ -139,23 +141,33 @@ fun CanvasContextMenu(
             onDismissRequest = onDismiss
         ) {
             if (state.regionId != null) {
+                val region = regions.lastOrNull { it.id == state.regionId }
+                val selectedCount = regions.count { it.selected }
                 val selectedVisibleCount = regions.count { it.selected && it.visible }
-                CanvasContextItem("选中区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, false) }
-                CanvasContextItem("聚焦区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, true) }
-                CanvasContextItem("预览区域", onDismiss = onDismiss) { onOpenRegionPreview(state.regionId) }
-                CanvasContextItem(
-                    regions.lastOrNull { it.id == state.regionId }?.let { if (it.visible) "隐藏区域" else "显示区域" } ?: "切换显示",
-                    onDismiss = onDismiss
-                ) {
-                    onToggleRegionVisibility(state.regionId)
-                }
-                if (selectedVisibleCount >= 2) {
+                val multiSelectionContext = region?.selected == true && selectedCount >= 2
+                if (multiSelectionContext) {
                     CanvasContextItem("合并选中区域", onDismiss = onDismiss) {
                         onMergeSelectedRegions()
                     }
-                }
-                CanvasContextItem("删除区域", color = Color(0xFFFF7C74), onDismiss = onDismiss) {
-                    onDeleteRegion(state.regionId)
+                    CanvasContextItem(if (selectedVisibleCount > 0) "隐藏选中区域" else "显示选中区域", onDismiss = onDismiss) {
+                        onToggleSelectedVisibility()
+                    }
+                    CanvasContextItem("删除选中区域", color = Color(0xFFFF7C74), onDismiss = onDismiss) {
+                        onDeleteSelectedRegions()
+                    }
+                } else {
+                    CanvasContextItem("选中区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, false) }
+                    CanvasContextItem("聚焦区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, true) }
+                    CanvasContextItem("预览区域", onDismiss = onDismiss) { onOpenRegionPreview(state.regionId) }
+                    CanvasContextItem(
+                        region?.let { if (it.visible) "隐藏区域" else "显示区域" } ?: "切换显示",
+                        onDismiss = onDismiss
+                    ) {
+                        onToggleRegionVisibility(state.regionId)
+                    }
+                    CanvasContextItem("删除区域", color = Color(0xFFFF7C74), onDismiss = onDismiss) {
+                        onDeleteRegion(state.regionId)
+                    }
                 }
             } else {
                 CanvasContextItem("适应窗口", onDismiss = onDismiss, onClick = onFitToViewport)

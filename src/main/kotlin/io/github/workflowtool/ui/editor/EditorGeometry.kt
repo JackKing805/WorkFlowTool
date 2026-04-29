@@ -98,8 +98,11 @@ internal fun maskEditModeForModifiers(altPressed: Boolean, shiftPressed: Boolean
         else -> MaskEditMode.Replace
     }
 
-internal fun canRefineHitRegion(toolMode: ToolMode, regionAlreadySelected: Boolean): Boolean =
-    toolMode != ToolMode.Move && regionAlreadySelected
+internal fun selectionBrushRadius(brushSizePx: Int, zoom: Float): Int =
+    (brushSizePx / zoom.coerceAtLeast(0.25f)).roundToInt().coerceIn(4, 96)
+
+internal fun canRefineHitRegion(toolMode: ToolMode): Boolean =
+    toolMode != ToolMode.Move
 
 private fun pointInsideRegion(region: CropRegion, point: Offset): Boolean {
     if (region.hasMask()) return region.maskAlphaAt(point.x.roundToInt(), point.y.roundToInt()) > 12

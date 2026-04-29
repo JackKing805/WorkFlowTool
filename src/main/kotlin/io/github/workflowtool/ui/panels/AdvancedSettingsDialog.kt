@@ -91,13 +91,20 @@ import io.github.workflowtool.ui.components.ToolButton
 import io.github.workflowtool.ui.components.namingModeLabel
 import io.github.workflowtool.ui.components.nextFormat
 import io.github.workflowtool.ui.components.nextNamingMode
+import io.github.workflowtool.ui.editor.drawCheckerboard
 import io.github.workflowtool.ui.theme.Panel
 import io.github.workflowtool.ui.theme.TextDim
+import java.nio.file.Path as NioPath
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import javax.imageio.ImageIO
 
 @Composable
 fun AdvancedSettingsDialog(controller: AppController) {
     val strings = controller.localization
     var showShortcutDialog by remember { mutableStateOf(false) }
+    var showEvolutionDialog by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = { controller.showAdvancedSettings(false) },
         title = { Text(strings.text(StringKey.AdvancedSettings), color = Color.White) },
@@ -114,12 +121,17 @@ fun AdvancedSettingsDialog(controller: AppController) {
                     modifier = Modifier.fillMaxWidth().height(36.dp)
                 )
                 SmallCheck("持续学习训练集", controller.continuousTrainingEnabled, controller::updateContinuousTrainingEnabled)
-                Text("开启后，仅从用户手动修正并导出确认的结果学习；训练会先生成候选模型，验证通过后才替换当前模型。", color = TextDim, fontSize = 12.sp)
+                Text("开启后，从精修确认和导出确认的用户结果学习；训练会先生成候选模型，验证通过后才替换当前模型。", color = TextDim, fontSize = 12.sp)
                 GhostButton(
                     "重建图标模型（本地训练样本）",
                     controller::retrainSeedAndUserFeedbackModelAsync,
                     modifier = Modifier.fillMaxWidth().height(36.dp),
                     enabled = !controller.isBusy
+                )
+                GhostButton(
+                    "模型进化过程",
+                    { showEvolutionDialog = true },
+                    modifier = Modifier.fillMaxWidth().height(36.dp)
                 )
                 Text(
                     "会合并本地训练样本和用户确认过的 user_feedback；候选模型通过验证后才会成为运行时模型。",
@@ -152,7 +164,148 @@ fun AdvancedSettingsDialog(controller: AppController) {
     if (showShortcutDialog) {
         ShortcutMappingDialog(onDismiss = { showShortcutDialog = false })
     }
+    if (showEvolutionDialog) {
+        ModelEvolutionDialog(onDismiss = { showEvolutionDialog = false })
+    }
 }
+
+@Composable
+private fun ModelEvolutionDialog(onDismiss: () -> Unit) {
+    var entries by remember { mutableStateOf(ModelEvolutionStore.load()) }
+    val config = remember(entries) { loadLearningConfig() }
+    val sampleCount = remember(entries) { userFeedbackSampleCount() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("模型进化过程", color = Color.White) },
+        backgroundColor = Panel,
+        text = {
+            Column(Modifier.width(640.dp).height(520.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    EvolutionMetric("Revision", config.revision.toString(), Modifier.weight(1f))
+                    EvolutionMetric("反馈样本", sampleCount.toString(), Modifier.weight(1f))
+                    EvolutionMetric("记录数", entries.size.toString(), Modifier.weight(1f))
+                }
+                if (entries.isEmpty()) {
+                    Box(
+                        Modifier.fillMaxSize().clip(RoundedCornerShape(6.dp)).background(Color(0xFF171C23))
+                            .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(6.dp)).padding(20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "还没有模型进化记录。开启持续学习，并完成精修确认或导出确认后会出现在这里。",
+                            color = TextDim,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        itemsIndexed(entries) { _, entry ->
+                            EvolutionEntryRow(entry)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            GhostButton("刷新", { entries = ModelEvolutionStore.load() }, modifier = Modifier.width(96.dp))
+        },
+        dismissButton = {
+            GhostButton("关闭", onDismiss, modifier = Modifier.width(96.dp))
+        }
+    )
+}
+
+@Composable
+private fun EvolutionMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xFF171C23))
+            .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(6.dp)).padding(10.dp)
+    ) {
+        Text(label, color = TextDim, fontSize = 12.sp)
+        Text(value, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun EvolutionEntryRow(entry: ModelEvolutionEntry) {
+    val statusColor = when (entry.status) {
+        ModelEvolutionStatus.Updated -> Color(0xFF76D39B)
+        ModelEvolutionStatus.Waiting -> Color(0xFFF3C969)
+        ModelEvolutionStatus.Failed -> Color(0xFFFF8A8A)
+    }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color(0xFF171C23))
+            .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(6.dp)).padding(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        EvolutionThumbnail(entry.thumbnailPath)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(evolutionStatusLabel(entry.status), color = statusColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(entry.source, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(formatEvolutionTime(entry.createdAtEpochMillis), color = TextDim, fontSize = 12.sp)
+            }
+            Text(
+                "${entry.trainingType} · 样本 ${entry.sampleCount} · Revision ${entry.revisionBefore} -> ${entry.revisionAfter}",
+                color = TextDim,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(entry.message, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (entry.changes.isEmpty()) {
+                    "参数未变化"
+                } else {
+                    entry.changes.joinToString("  ") { "${it.label}: ${it.before} -> ${it.after}" }
+                },
+                color = if (entry.changes.isEmpty()) TextDim else Color(0xFFB8C7E6),
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun EvolutionThumbnail(path: NioPath?) {
+    val bitmap = remember(path) {
+        runCatching {
+            path?.takeIf { it.toFile().isFile }?.let { ImageIO.read(it.toFile())?.toComposeImageBitmap() }
+        }.getOrNull()
+    }
+    Box(
+        Modifier.width(92.dp).height(72.dp).clip(RoundedCornerShape(5.dp))
+            .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(5.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.fillMaxSize()) { drawCheckerboard(size) }
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().padding(5.dp),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text("无缩略图", color = TextDim, fontSize = 11.sp)
+        }
+    }
+}
+
+private fun evolutionStatusLabel(status: ModelEvolutionStatus): String = when (status) {
+    ModelEvolutionStatus.Updated -> "已进化"
+    ModelEvolutionStatus.Waiting -> "等待"
+    ModelEvolutionStatus.Failed -> "失败"
+}
+
+private fun formatEvolutionTime(epochMillis: Long): String =
+    runCatching {
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+            .format(Instant.ofEpochMilli(epochMillis).atZone(ZoneId.systemDefault()))
+    }.getOrDefault("--")
 
 @Composable
 private fun ShortcutMappingDialog(onDismiss: () -> Unit) {
@@ -182,6 +335,7 @@ private fun ShortcutMappingDialog(onDismiss: () -> Unit) {
                         ShortcutItem("框选工具拖拽", "框选范围并自动识别/贴合图标"),
                         ShortcutItem("选中区域 + Shift 拖动", "把新增范围内的图标并入当前选区整体并贴合边缘"),
                         ShortcutItem("选中区域 + Alt/Option 拖动", "减少选区，可先按鼠标或先按快捷键"),
+                        ShortcutItem("[ / ]", "减小 / 增大精修画笔"),
                         ShortcutItem("普通拖动选框", "移动区域，不触发画笔精修")
                     )
                 )

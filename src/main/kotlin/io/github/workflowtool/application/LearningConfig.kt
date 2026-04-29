@@ -162,12 +162,6 @@ fun saveLearningConfig(config: LearningConfig, backup: Boolean = true) {
 
 private fun learningConfigFile() = AppRuntimeFiles.pythonDir.resolve("model").resolve("learning-config.json")
 
-private fun userFeedbackSampleCount(): Int {
-    val manifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
-    if (!manifest.exists()) return 0
-    return runCatching { Files.readAllLines(manifest, Charsets.UTF_8).count { it.isNotBlank() } }.getOrDefault(0)
-}
-
 private fun LearningConfig.toJson(): String = """
 {
   "revision": $revision,

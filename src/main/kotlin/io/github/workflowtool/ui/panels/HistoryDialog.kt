@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogWindow
 import androidx.compose.ui.window.rememberDialogState
 import io.github.workflowtool.application.AppController
+import io.github.workflowtool.application.WorkspaceHistoryStore
 import io.github.workflowtool.application.WorkspaceSnapshotEntry
 import io.github.workflowtool.ui.components.GhostButton
 import io.github.workflowtool.ui.theme.Border
@@ -65,7 +66,7 @@ fun HistoryDialog(controller: AppController) {
                 Column(Modifier.weight(1f)) {
                     Text("历史记录", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "保留最近 ${controller.workspaceHistoryEntries.size} 条工作快照，可直接重开并恢复区域状态。",
+                        "保留最近 ${WorkspaceHistoryStore.MaxEntries} 条画布快照，当前 ${controller.workspaceHistoryEntries.size} 条。可直接恢复最新区域状态。",
                         color = TextMuted,
                         fontSize = 12.sp
                     )
@@ -109,7 +110,7 @@ private fun EmptyHistoryState() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("暂无历史快照", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            Text("打开图片并生成或修改区域后，这里会自动保存可恢复的工作快照。", color = TextMuted, fontSize = 13.sp)
+            Text("打开图片并编辑区域后，这里会自动保存可恢复的画布快照。", color = TextMuted, fontSize = 13.sp)
         }
     }
 }
@@ -149,10 +150,7 @@ private fun HistoryEntryCard(entry: WorkspaceSnapshotEntry, controller: AppContr
             }
         }
 
-        Column(
-            Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -171,29 +169,20 @@ private fun HistoryEntryCard(entry: WorkspaceSnapshotEntry, controller: AppContr
                 HistoryTag("${entry.sourcePaths.size} 张源图")
             }
             Text(formatHistoryTime(entry.updatedAtEpochMillis), color = TextMuted, fontSize = 12.sp)
-            Text(
-                entry.sourcePathLabel,
-                color = TextDim,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Text(entry.sourcePathLabel, color = TextDim, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 HistoryInfo("${entry.imageWidth} x ${entry.imageHeight}")
                 HistoryInfo("${entry.regions.size} 个区域")
                 HistoryInfo(if (entry.hasManualEdits) "可恢复手工状态" else "基础快照")
             }
             if (!entry.allFilesAvailable) {
-                Text("缺失 ${entry.missingFileCount} 个源文件，当前无法重开恢复。", color = Danger, fontSize = 12.sp)
+                Text("缺失 ${entry.missingFileCount} 个源文件，当前无法恢复。", color = Danger, fontSize = 12.sp)
             }
         }
 
-        Column(
-            Modifier.width(128.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(Modifier.width(128.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             GhostButton(
-                "重开并恢复",
+                "恢复快照",
                 onClick = { controller.reopenHistorySnapshotAsync(entry.id) },
                 modifier = Modifier.fillMaxWidth().height(38.dp),
                 active = true,

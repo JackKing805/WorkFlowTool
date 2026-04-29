@@ -50,11 +50,13 @@ import io.github.workflowtool.application.invertSelection
 import io.github.workflowtool.application.mergeSelectedRegions
 import io.github.workflowtool.application.openOutputDirectory
 import io.github.workflowtool.application.removeRegion
+import io.github.workflowtool.application.removeSelectedRegions
 import io.github.workflowtool.application.selectRegionRange
 import io.github.workflowtool.application.selectRegion
 import io.github.workflowtool.application.selectAll
 import io.github.workflowtool.application.selectAndFocusRegion
 import io.github.workflowtool.application.toggleRegionSelection
+import io.github.workflowtool.application.toggleSelectedVisibility
 import io.github.workflowtool.application.toggleVisibility
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.model.CropRegion
@@ -181,7 +183,8 @@ fun RegionRow(
         RegionRowContextMenu(
             expanded = menuExpanded,
             region = region,
-            selectedCount = controller.regions.count { it.selected && it.visible },
+            selectedCount = controller.regions.count { it.selected },
+            selectedVisibleCount = controller.regions.count { it.selected && it.visible },
             onDismiss = { menuExpanded = false },
             controller = controller
         )
@@ -193,19 +196,26 @@ private fun RegionRowContextMenu(
     expanded: Boolean,
     region: CropRegion,
     selectedCount: Int,
+    selectedVisibleCount: Int,
     onDismiss: () -> Unit,
     controller: AppController
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        RegionMenuItem("选中区域", onDismiss) { controller.selectRegion(region.id) }
-        RegionMenuItem("加入多选", onDismiss) { controller.selectRegion(region.id, additive = true) }
-        RegionMenuItem("聚焦区域", onDismiss) { controller.selectAndFocusRegion(region.id, fit = true) }
-        RegionMenuItem("预览区域", onDismiss) { controller.openRegionPreview(region.id) }
-        RegionMenuItem(if (region.visible) "隐藏区域" else "显示区域", onDismiss) { controller.toggleVisibility(region.id) }
-        if (selectedCount >= 2) {
+        val multiSelectionContext = region.selected && selectedCount >= 2
+        if (multiSelectionContext) {
             RegionMenuItem("合并选中区域", onDismiss) { controller.mergeSelectedRegions() }
+            RegionMenuItem(if (selectedVisibleCount > 0) "隐藏选中区域" else "显示选中区域", onDismiss) {
+                controller.toggleSelectedVisibility()
+            }
+            RegionMenuItem("删除选中区域", onDismiss, color = Danger) { controller.removeSelectedRegions() }
+        } else {
+            RegionMenuItem("选中区域", onDismiss) { controller.selectRegion(region.id) }
+            RegionMenuItem("加入多选", onDismiss) { controller.selectRegion(region.id, additive = true) }
+            RegionMenuItem("聚焦区域", onDismiss) { controller.selectAndFocusRegion(region.id, fit = true) }
+            RegionMenuItem("预览区域", onDismiss) { controller.openRegionPreview(region.id) }
+            RegionMenuItem(if (region.visible) "隐藏区域" else "显示区域", onDismiss) { controller.toggleVisibility(region.id) }
+            RegionMenuItem("删除区域", onDismiss, color = Danger) { controller.removeRegion(region.id) }
         }
-        RegionMenuItem("删除区域", onDismiss, color = Danger) { controller.removeRegion(region.id) }
     }
 }
 

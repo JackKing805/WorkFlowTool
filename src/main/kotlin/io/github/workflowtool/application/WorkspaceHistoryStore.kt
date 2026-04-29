@@ -59,7 +59,7 @@ internal data class WorkspaceSnapshotEntry(
 }
 
 internal object WorkspaceHistoryStore {
-    private const val MaxEntries = 12
+    const val MaxEntries = 100
     private val historyFile: Path get() = AppRuntimeFiles.runtimeRoot.resolve("workspace-history.json")
     private val previewRoot: Path get() = AppRuntimeFiles.runtimeRoot.resolve("history-previews")
 

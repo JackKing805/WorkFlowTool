@@ -9,10 +9,20 @@ import java.time.format.DateTimeFormatter
 import javax.imageio.ImageIO
 import kotlin.io.path.exists
 
+data class TrainingSampleResult(
+    val success: Boolean,
+    val imagePath: Path? = null,
+    val regionCount: Int = 0
+)
+
 fun AppController.appendTrainingSample(sourceLabel: String): Boolean {
-    val loaded = image ?: return false
+    return appendTrainingSampleResult(sourceLabel).success
+}
+
+fun AppController.appendTrainingSampleResult(sourceLabel: String): TrainingSampleResult {
+    val loaded = image ?: return TrainingSampleResult(false)
     val visibleRegions = regions.filter { it.visible }
-    if (visibleRegions.isEmpty()) return false
+    if (visibleRegions.isEmpty()) return TrainingSampleResult(false)
     return runCatching {
         val datasetRoot = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback")
         val imagesDir = datasetRoot.resolve("images")
@@ -42,10 +52,10 @@ fun AppController.appendTrainingSample(sourceLabel: String): Boolean {
             java.nio.file.StandardOpenOption.APPEND
         )
         log("持续学习样本已记录：$sourceLabel，${visibleRegions.size} 个区域")
-        true
+        TrainingSampleResult(true, target, visibleRegions.size)
     }.onFailure {
         log("持续学习样本记录失败：${it.message}")
-    }.getOrDefault(false)
+    }.getOrDefault(TrainingSampleResult(false))
 }
 
 fun AppController.appendBackgroundTrainingSample(sourceLabel: String): Boolean {
@@ -76,17 +86,55 @@ fun AppController.retrainSeedAndUserFeedbackModelAsync() {
     }
 }
 
+fun AppController.recordFineRefineFeedbackAsync() {
+    if (!continuousTrainingEnabled) {
+        log("精修反馈未进入训练：持续学习未开启")
+        return
+    }
+    val fingerprint = buildFineRefineTrainingFingerprint()
+    if (hasTrainingFingerprint(fingerprint)) {
+        log("精修反馈未重复记录：当前选区状态已经进入过持续学习")
+        return
+    }
+    runBusy("正在用精修反馈更新模型...") {
+        val iconSample = appendTrainingSampleResult("精修确认")
+        val backgroundUpdated = appendBackgroundTrainingSample("精修确认")
+        val update = ContinuousTrainingUpdate(icon = iconSample.success, background = backgroundUpdated)
+        if (!update.hasUpdates) {
+            log("精修反馈未更新：没有可用训练样本")
+            return@runBusy
+        }
+        val trained = retrainContinuousModels(update, sourceLabel = "精修确认", thumbnailPath = iconSample.imagePath)
+        if (trained) {
+            rememberTrainingFingerprint(fingerprint)
+        }
+    }
+}
+
 fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
     return runCatching {
         setTrainingBusyMessage("正在合并本地训练样本...")
+        val beforeConfig = loadLearningConfig()
         val makeDataset = runPythonCommand("make_training_set.py")
         check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
-        val learningConfig = loadLearningConfig()
 
         trainAndPromoteIconModel(
             dataset = "training_sets/combined",
-            epochs = learningConfig.fullRetrainEpochs.toString(),
-            batch = learningConfig.fullBatch.toString()
+            epochs = beforeConfig.fullRetrainEpochs.toString(),
+            batch = beforeConfig.fullBatch.toString()
+        )
+        val afterConfig = loadLearningConfig()
+        ModelEvolutionStore.append(
+            buildModelEvolutionEntry(
+                source = "手动重建",
+                status = ModelEvolutionStatus.Updated,
+                sampleCount = userFeedbackSampleCount(),
+                trainingType = "完整重建",
+                message = "已合并本地训练样本并重建图标模型",
+                thumbnailPath = latestUserFeedbackImagePath(),
+                before = beforeConfig,
+                after = afterConfig
+            )
         )
         log("图标模型已根据本地训练样本重建")
         true
@@ -95,16 +143,23 @@ fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
     }.getOrDefault(false)
 }
 
-fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boolean {
+fun AppController.retrainContinuousModels(
+    update: ContinuousTrainingUpdate,
+    sourceLabel: String = "持续学习",
+    thumbnailPath: Path? = null
+): Boolean {
+    val beforeConfig = loadLearningConfig()
+    var trainingType = "未训练"
     return runCatching {
         setTrainingBusyMessage("正在用本次结果更新模型...")
         if (update.icon) {
-            val learningConfig = loadLearningConfig()
+            val learningConfig = beforeConfig
             val makeDataset = runPythonCommand("make_training_set.py")
             check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
             val recentManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("recent_feedback").resolve("annotations.jsonl")
             var iconModelUpdated = false
             if (shouldRunFullIconRetrain()) {
+                trainingType = "完整重训"
                 iconModelUpdated = trainCandidateAndPromoteIconModel(
                     dataset = "training_sets/combined",
                     epochs = learningConfig.fullRetrainEpochs.toString(),
@@ -113,6 +168,7 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
                 )
             }
             if (recentManifest.exists() && shouldRunRecentIconFineTune()) {
+                trainingType = if (iconModelUpdated) "$trainingType + 最近样本微调" else "最近样本微调"
                 iconModelUpdated = trainCandidateAndPromoteIconModel(
                     dataset = "training_sets/recent_feedback",
                     epochs = learningConfig.recentFineTuneEpochs.toString(),
@@ -122,11 +178,37 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
             }
             if (iconModelUpdated) {
                 AppRuntimeFiles.markUserModelUpdated()
-                evolveLearningConfigAfterFeedback()?.let { evolution ->
+                val evolution = evolveLearningConfigAfterFeedback()
+                evolution?.let {
                     log("模型参数已自适应更新：${evolution.summary()}")
                 }
+                val afterConfig = evolution?.updated ?: loadLearningConfig()
+                ModelEvolutionStore.append(
+                    buildModelEvolutionEntry(
+                        source = sourceLabel,
+                        status = ModelEvolutionStatus.Updated,
+                        sampleCount = userFeedbackSampleCount(),
+                        trainingType = trainingType,
+                        message = "候选模型验证通过，已替换运行时模型",
+                        thumbnailPath = thumbnailPath ?: latestUserFeedbackImagePath(),
+                        before = beforeConfig,
+                        after = afterConfig
+                    )
+                )
             }
             if (!iconModelUpdated) {
+                ModelEvolutionStore.append(
+                    buildModelEvolutionEntry(
+                        source = sourceLabel,
+                        status = ModelEvolutionStatus.Waiting,
+                        sampleCount = userFeedbackSampleCount(),
+                        trainingType = "等待更多样本",
+                        message = "本次反馈已记录，样本数量暂未触发模型训练",
+                        thumbnailPath = thumbnailPath ?: latestUserFeedbackImagePath(),
+                        before = beforeConfig,
+                        after = beforeConfig
+                    )
+                )
                 log("持续学习样本已记录：等待更多确认样本后训练")
             }
         }
@@ -134,6 +216,18 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
         log("持续学习处理完成")
         true
     }.onFailure {
+        ModelEvolutionStore.append(
+            buildModelEvolutionEntry(
+                source = sourceLabel,
+                status = ModelEvolutionStatus.Failed,
+                sampleCount = userFeedbackSampleCount(),
+                trainingType = trainingType,
+                message = it.message ?: "持续学习模型更新失败",
+                thumbnailPath = thumbnailPath ?: latestUserFeedbackImagePath(),
+                before = beforeConfig,
+                after = loadLearningConfig()
+            )
+        )
         log("持续学习模型更新失败：${it.message}")
     }.getOrDefault(false)
 }
@@ -287,6 +381,25 @@ fun AppController.buildTrainingFingerprint(config: ExportConfig): String {
     return sha256(source)
 }
 
+fun AppController.buildFineRefineTrainingFingerprint(): String {
+    val source = buildString {
+        append("type=fine_refine").append('\n')
+        append("image=").append(imageIdentity()).append('\n')
+        append("regions=").append(trainingComparableRegions(regions).filter { it.visible }.joinToString("|") { region ->
+            buildString {
+                append(region.x).append(',').append(region.y).append(',')
+                    .append(region.width).append(',').append(region.height).append(',')
+                    .append(region.visible)
+                append(':')
+                append(region.maskWidth).append('x').append(region.maskHeight).append(':')
+                append(region.alphaMask.joinToString(","))
+            }
+        }).append('\n')
+        append("sampledBackground=").append(sampledBackgroundArgb ?: "auto")
+    }
+    return sha256(source)
+}
+
 fun AppController.imageIdentity(): String {
     val loaded = image ?: return "none"
     val files = imageFiles.takeIf { it.isNotEmpty() } ?: imageFile?.let(::listOf).orEmpty()
@@ -322,6 +435,25 @@ fun AppController.rememberTrainingFingerprint(fingerprint: String) {
 
 fun trainingFingerprintFile(): Path {
     return AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("trained_fingerprints.txt")
+}
+
+fun userFeedbackSampleCount(): Int {
+    val manifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
+    if (!manifest.exists()) return 0
+    return runCatching { Files.readAllLines(manifest, Charsets.UTF_8).count { it.isNotBlank() } }.getOrDefault(0)
+}
+
+fun latestUserFeedbackImagePath(): Path? {
+    val imagesDir = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("images")
+    if (!imagesDir.exists()) return null
+    return runCatching {
+        Files.list(imagesDir).use { stream ->
+            stream
+                .filter(Files::isRegularFile)
+                .max(Comparator.comparingLong { path -> Files.getLastModifiedTime(path).toMillis() })
+                .orElse(null)
+        }
+    }.getOrNull()
 }
 
 fun runPythonCommand(vararg args: String): ProcessResult {

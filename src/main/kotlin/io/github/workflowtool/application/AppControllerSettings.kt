@@ -80,3 +80,17 @@ fun AppController.updateContinuousTrainingEnabled(next: Boolean) {
     persistSettings()
     log(if (next) "持续学习已开启：只有手动修正后导出确认的区域会更新训练集并重训模型" else "持续学习已关闭")
 }
+
+fun AppController.updateRefineBrushSize(next: Int) {
+    val sanitized = next.coerceIn(MinRefineBrushSizePx, MaxRefineBrushSizePx)
+    if (refineBrushSizePx == sanitized) return
+    refineBrushSizePx = sanitized
+}
+
+fun AppController.increaseRefineBrushSize() {
+    updateRefineBrushSize(refineBrushSizePx + RefineBrushSizeStepPx)
+}
+
+fun AppController.decreaseRefineBrushSize() {
+    updateRefineBrushSize(refineBrushSizePx - RefineBrushSizeStepPx)
+}

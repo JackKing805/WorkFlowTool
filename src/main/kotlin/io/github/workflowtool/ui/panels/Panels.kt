@@ -36,6 +36,7 @@ import io.github.workflowtool.application.updateKeepOriginalSize
 import io.github.workflowtool.application.updateNamingMode
 import io.github.workflowtool.application.updateOutputFormat
 import io.github.workflowtool.application.updatePadToSquare
+import io.github.workflowtool.application.updateRefineBrushSize
 import io.github.workflowtool.application.updateRemoveBackgroundToTransparent
 import io.github.workflowtool.application.updateTrimTransparent
 import io.github.workflowtool.domain.StringKey
@@ -163,6 +164,9 @@ fun LeftPanel(controller: AppController, modifier: Modifier = Modifier) {
             }
             Spacer(Modifier.height(8.dp))
             Text("在预览区拖拽框选一个范围，松开后会自动识别范围内的图标区域。", color = TextDim, fontSize = 12.sp)
+            CompactNumber("精修画笔", controller.refineBrushSizePx, "px") {
+                controller.updateRefineBrushSize(it)
+            }
             SettingSwitch("合并相邻区域", "将相近且紧挨的候选区域合并。", controller.detectionConfig.mergeNearbyRegions) {
                 controller.updateDetectionConfig(controller.detectionConfig.copy(mergeNearbyRegions = it))
             }

@@ -108,6 +108,8 @@ class AppController(
         internal set
     var continuousTrainingEnabled by mutableStateOf(false)
         internal set
+    var refineBrushSizePx by mutableStateOf(DefaultRefineBrushSizePx)
+        internal set
     var runtimePreparationStage by mutableStateOf(RuntimePreparationStage.NotChecked)
         private set
     var runtimePreparationMessage by mutableStateOf("尚未检查 Python 运行环境")
@@ -353,15 +355,16 @@ class AppController(
                 log("持续学习未更新：当前选框和参数已训练过")
                 return
             }
+            val iconSample = appendTrainingSampleResult("手动修正后导出确认")
             val trainingUpdate = ContinuousTrainingUpdate(
-                icon = appendTrainingSample("手动修正后导出确认"),
+                icon = iconSample.success,
                 background = appendBackgroundTrainingSample("手动修正后背景确认")
             )
             if (!trainingUpdate.hasUpdates) {
                 log("持续学习未更新：没有可用的用户确认训练样本")
                 return
             }
-            if (retrainContinuousModels(trainingUpdate)) {
+            if (retrainContinuousModels(trainingUpdate, sourceLabel = "导出确认", thumbnailPath = iconSample.imagePath)) {
                 rememberTrainingFingerprint(trainingFingerprint)
             }
         } else if (continuousTrainingEnabled && result.successCount > 0) {
@@ -777,16 +780,20 @@ class AppController(
         val clamped = clampRegionToImage(region) ?: return null
         val config = effectiveDetectionConfig()
         val backgroundArgb = foregroundSnapBackgroundArgb(loaded)
-        val crop = cropImageRegion(loaded, clamped)
+        val detectionBounds = expandManualRefineDetectionBounds(loaded, clamped, config)
+        val crop = cropImageRegion(loaded, detectionBounds)
         val detected = detector.detect(crop, config)
         val shifted = detected.regions.map { detectedRegion ->
             detectedRegion.copy(
-                x = detectedRegion.x + clamped.x,
-                y = detectedRegion.y + clamped.y,
+                x = detectedRegion.x + detectionBounds.x,
+                y = detectedRegion.y + detectionBounds.y,
                 selected = true
             )
         }.mapNotNull { clampRegionToImage(it) }
         lastDetectionResult = detected.copy(regions = shifted)
+        val maxScore = shifted.mapNotNull { it.score }.maxOrNull()
+        val modelSummary = "模型命中 ${shifted.size} 个候选" +
+            (maxScore?.let { "，最高置信度 %.2f".format(it) } ?: "")
         val candidate = buildWholeRegionCandidate(
             loaded = loaded,
             shifted = shifted,
@@ -795,7 +802,22 @@ class AppController(
             mode = lastDetectionResult.mode,
             constrainToUserMask = clamped.hasMask() && clamped.alphaMask.any { it <= 0 }
         )
-        return constrainedRefineUserRegion(
+        val overlap = candidate?.let { manualRefineOverlapRatio(clamped, it) }
+        val hasLockedNegativeMask = clamped.hasMask() && clamped.alphaMask.any { it <= 0 }
+        val modelUsable = candidate != null &&
+            (!hasLockedNegativeMask || (overlap ?: 0.0) >= (1.0 - config.manualRefineConflictTolerance).coerceIn(0.05, 0.95))
+        when {
+            candidate == null -> log("精修贴合：$modelSummary，未形成有效模型区域，已回退颜色贴边")
+            modelUsable -> log(
+                "精修贴合：$modelSummary，采用模型候选" +
+                    (overlap?.let { "，用户遮罩重叠 %.0f%%".format(it * 100.0) } ?: "")
+            )
+            else -> log(
+                "精修贴合：$modelSummary，模型候选与用户删减区域冲突，已回退颜色贴边" +
+                    (overlap?.let { "，重叠 %.0f%%".format(it * 100.0) } ?: "")
+            )
+        }
+        val refined = constrainedRefineUserRegion(
             image = loaded,
             region = clamped.copy(selected = true),
             candidate = candidate,
@@ -803,6 +825,10 @@ class AppController(
             backgroundArgb = backgroundArgb,
             mode = lastDetectionResult.mode
         )?.copy(id = clamped.id, visible = clamped.visible, selected = true, score = clamped.score)
+        if (refined == null) {
+            log("精修贴合失败：模型与颜色贴边都没有生成有效区域")
+        }
+        return refined
     }
 
     internal fun snapUserRegionToForeground(region: CropRegion): CropRegion? {
@@ -857,6 +883,28 @@ class AppController(
             ?: lastDetectionResult.stats.estimatedBackgroundArgb.takeIf { it != 0 }
             ?: estimateCornerBackgroundArgb(loaded)
 
+    private fun expandManualRefineDetectionBounds(
+        loaded: BufferedImage,
+        region: CropRegion,
+        config: DetectionConfig
+    ): CropRegion {
+        val adaptivePadding = (maxOf(region.width, region.height) * 0.25f).toInt()
+        val padding = maxOf(8, config.manualRefineExpansionRadius, adaptivePadding).coerceAtMost(96)
+        val left = (region.x - padding).coerceAtLeast(0)
+        val top = (region.y - padding).coerceAtLeast(0)
+        val right = (region.right + padding).coerceAtMost(loaded.width)
+        val bottom = (region.bottom + padding).coerceAtMost(loaded.height)
+        return region.copy(
+            x = left,
+            y = top,
+            width = (right - left).coerceAtLeast(1),
+            height = (bottom - top).coerceAtLeast(1),
+            alphaMask = emptyList(),
+            maskWidth = 0,
+            maskHeight = 0
+        )
+    }
+
     private fun cropImageRegion(loaded: BufferedImage, region: CropRegion): BufferedImage {
         val crop = BufferedImage(region.width, region.height, BufferedImage.TYPE_INT_ARGB)
         val graphics = crop.createGraphics()
@@ -877,3 +925,8 @@ class AppController(
     }
 
 }
+
+const val MinRefineBrushSizePx = 4
+const val MaxRefineBrushSizePx = 64
+const val DefaultRefineBrushSizePx = 18
+const val RefineBrushSizeStepPx = 2

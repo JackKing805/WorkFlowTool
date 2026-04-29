@@ -30,14 +30,18 @@ import androidx.compose.ui.unit.sp
 import io.github.workflowtool.application.AppController
 import io.github.workflowtool.application.clearRegions
 import io.github.workflowtool.application.clearSelection
+import io.github.workflowtool.application.decreaseRefineBrushSize
 import io.github.workflowtool.application.fitToViewport
+import io.github.workflowtool.application.increaseRefineBrushSize
 import io.github.workflowtool.application.mergeSelectedRegions
 import io.github.workflowtool.application.panViewport
 import io.github.workflowtool.application.removeRegion
+import io.github.workflowtool.application.removeSelectedRegions
 import io.github.workflowtool.application.replaceRegions
 import io.github.workflowtool.application.selectAndFocusRegion
 import io.github.workflowtool.application.selectRegion
 import io.github.workflowtool.application.selectRegionsInBounds
+import io.github.workflowtool.application.toggleSelectedVisibility
 import io.github.workflowtool.application.toggleVisibility
 import io.github.workflowtool.application.updatePointerHover
 import io.github.workflowtool.application.updateViewportSize
@@ -111,6 +115,7 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 showGrid = controller.showGrid,
                                 toolMode = controller.toolMode,
                                 backgroundPickArmed = controller.backgroundPickArmed,
+                                refineBrushSizePx = controller.refineBrushSizePx,
                                 onViewport = controller::updateViewportSize,
                                 onPan = controller::panViewport,
                                 onZoom = controller::zoomAroundImagePoint,
@@ -122,12 +127,16 @@ fun IconCropperApp(controller: AppController, windowController: WindowController
                                 onHover = controller::updatePointerHover,
                                 onClearSelection = controller::clearSelection,
                                 onDeleteRegion = controller::removeRegion,
+                                onDeleteSelectedRegions = controller::removeSelectedRegions,
                                 onToggleRegionVisibility = controller::toggleVisibility,
+                                onToggleSelectedVisibility = controller::toggleSelectedVisibility,
                                 onFocusRegion = controller::selectAndFocusRegion,
                                 onOpenRegionPreview = controller::openRegionPreview,
                                 onMergeSelectedRegions = controller::mergeSelectedRegions,
                                 onFitToViewport = controller::fitToViewport,
-                                onClearRegions = controller::clearRegions
+                                onClearRegions = controller::clearRegions,
+                                onIncreaseRefineBrushSize = controller::increaseRefineBrushSize,
+                                onDecreaseRefineBrushSize = controller::decreaseRefineBrushSize
                             )
                             Spacer(Modifier.height(12.dp))
                             PreviewStatusBar(controller)

@@ -20,6 +20,7 @@ import javax.imageio.ImageIO
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -128,6 +129,42 @@ class AppControllerTest {
 
         controller.toggleRegionSelection("b")
         assertEquals(listOf("a"), controller.regions.filter { it.selected }.map { it.id })
+    }
+
+    @Test
+    fun refineBrushSizeDefaultsAndClampsToSessionBounds() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        assertEquals(DefaultRefineBrushSizePx, controller.refineBrushSizePx)
+
+        controller.updateRefineBrushSize(1)
+        assertEquals(MinRefineBrushSizePx, controller.refineBrushSizePx)
+
+        controller.updateRefineBrushSize(999)
+        assertEquals(MaxRefineBrushSizePx, controller.refineBrushSizePx)
+    }
+
+    @Test
+    fun refineBrushSizeStepsByConfiguredAmount() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.increaseRefineBrushSize()
+        assertEquals(DefaultRefineBrushSizePx + RefineBrushSizeStepPx, controller.refineBrushSizePx)
+
+        controller.decreaseRefineBrushSize()
+        assertEquals(DefaultRefineBrushSizePx, controller.refineBrushSizePx)
     }
 
     @Test
@@ -259,6 +296,64 @@ class AppControllerTest {
         controller.removeRegion("hole")
 
         assertEquals(listOf("outer", "other"), controller.regions.map { it.id })
+    }
+
+    @Test
+    fun removeSelectedRegionsRemovesSelectionAndClearsPreview() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10, selected = true),
+                CropRegion("b", 20, 0, 10, 10, selected = true),
+                CropRegion("c", 40, 0, 10, 10)
+            )
+        )
+        controller.openRegionPreview("b")
+
+        controller.removeSelectedRegions()
+
+        assertEquals(listOf("c"), controller.regions.map { it.id })
+        assertEquals(null, controller.previewRegion)
+    }
+
+    @Test
+    fun toggleSelectedVisibilityHidesVisibleSelectionAndShowsHiddenSelection() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10, selected = true, visible = true),
+                CropRegion("b", 20, 0, 10, 10, selected = true, visible = false),
+                CropRegion("c", 40, 0, 10, 10, visible = true)
+            )
+        )
+
+        controller.toggleSelectedVisibility()
+
+        assertEquals(false, controller.regions.first { it.id == "a" }.visible)
+        assertEquals(false, controller.regions.first { it.id == "b" }.visible)
+        assertEquals(true, controller.regions.first { it.id == "c" }.visible)
+
+        controller.toggleSelectedVisibility()
+
+        assertEquals(true, controller.regions.first { it.id == "a" }.visible)
+        assertEquals(true, controller.regions.first { it.id == "b" }.visible)
+        assertEquals(true, controller.regions.first { it.id == "c" }.visible)
     }
 
     @Test
@@ -459,6 +554,151 @@ class AppControllerTest {
         assertEquals(1, controller.workspaceHistoryEntries.size)
         assertEquals(file.absolutePath, controller.workspaceHistoryEntries.single().sourcePaths.single().toFile().absolutePath)
         assertTrue(controller.workspaceHistoryEntries.single().previewPath.toFile().isFile)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun workspaceHistoryKeepsMostRecentHundredSnapshots() {
+        WorkspaceHistoryStore.clear()
+        val source = createImageFile(width = 12, height = 12).toPath()
+        var entries = emptyList<WorkspaceSnapshotEntry>()
+
+        repeat(101) { index ->
+            val entry = WorkspaceSnapshotEntry(
+                id = "history-$index",
+                title = "history $index",
+                sourcePaths = listOf(source.resolveSibling("history-$index.png")),
+                currentImageIndex = 0,
+                updatedAtEpochMillis = index.toLong(),
+                imageWidth = 12,
+                imageHeight = 12,
+                hasManualEdits = false,
+                baseRegions = emptyList(),
+                regions = emptyList()
+            )
+            entries = WorkspaceHistoryStore.upsert(
+                existing = entries,
+                entry = entry,
+                preview = BufferedImage(12, 12, BufferedImage.TYPE_INT_ARGB)
+            )
+        }
+
+        val loaded = WorkspaceHistoryStore.load()
+
+        assertEquals(WorkspaceHistoryStore.MaxEntries, loaded.size)
+        assertEquals("history-100", loaded.first().id)
+        assertFalse(loaded.any { it.id == "history-0" })
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun workspaceHistoryUpdatesExistingCanvasInsteadOfDuplicatingIt() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        controller.loadFile(file)
+        val snapshotId = controller.workspaceHistoryEntries.single().id
+        controller.replaceRegions("manual", listOf(CropRegion("manual", 6, 7, 8, 9)))
+
+        val loaded = WorkspaceHistoryStore.load()
+
+        assertEquals(1, loaded.size)
+        assertEquals(snapshotId, loaded.single().id)
+        assertEquals(6, loaded.single().regions.single().x)
+        assertTrue(loaded.single().hasManualEdits)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun removingHistorySnapshotDeletesEntryAndPreview() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        controller.loadFile(file)
+        val entry = controller.workspaceHistoryEntries.single()
+        assertTrue(Files.exists(entry.previewPath))
+
+        controller.removeHistorySnapshot(entry.id)
+
+        assertEquals(emptyList(), controller.workspaceHistoryEntries)
+        assertFalse(Files.exists(entry.previewPath))
+        assertEquals(emptyList(), WorkspaceHistoryStore.load())
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun clearingRegionsUpdatesWorkspaceHistorySnapshot() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val controller = AppController(
+            detector = StaticDetector(listOf(CropRegion("auto", 2, 3, 10, 11))),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        controller.loadFile(file)
+        controller.clearRegions()
+
+        val entry = WorkspaceHistoryStore.load().single()
+        assertEquals(emptyList(), entry.regions)
+        assertTrue(entry.hasManualEdits)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun reopeningMultiImageHistoryRestoresCanvasSourcesAndRegions() {
+        WorkspaceHistoryStore.clear()
+        val first = createImageFile(width = 24, height = 20)
+        val second = createImageFile(width = 16, height = 18)
+        val savingController = AppController(
+            detector = StaticDetector(listOf(CropRegion("auto", 1, 2, 6, 6))),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        savingController.loadFiles(listOf(first, second))
+        savingController.replaceRegions("manual", listOf(CropRegion("multi", 30, 4, 8, 8, selected = true)))
+        val snapshotId = savingController.workspaceHistoryEntries.single().id
+
+        val restoringController = AppController(
+            detector = CountingDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        restoringController.reopenHistorySnapshot(snapshotId)
+
+        assertEquals(2, restoringController.imageFiles.size)
+        assertEquals(listOf(first.absolutePath, second.absolutePath), restoringController.imageFiles.map { it.absolutePath })
+        assertEquals(1, restoringController.regions.size)
+        assertEquals("multi", restoringController.regions.single().id)
+        assertEquals(30, restoringController.regions.single().x)
+        assertTrue(restoringController.hasManualEdits)
         WorkspaceHistoryStore.clear()
     }
 
@@ -786,6 +1026,7 @@ class AppControllerTest {
         assertTrue(region.maskAlphaAt(8, 8) > 0)
         assertTrue(region.maskAlphaAt(34, 8) > 0)
         assertTrue(controller.logs.any { it.contains("选区已按用户精修结果补全并贴合") })
+        assertTrue(controller.logs.any { it.contains("未形成有效模型区域，已回退颜色贴边") })
     }
 
     @Test
@@ -806,12 +1047,40 @@ class AppControllerTest {
 
         val region = controller.regions.single()
         assertEquals("whole", region.id)
-        assertEquals(7, region.x)
-        assertEquals(8, region.y)
+        assertEquals(3, region.x)
+        assertEquals(4, region.y)
         assertEquals(20, region.width)
         assertEquals(10, region.height)
         assertTrue(region.selected)
         assertTrue(region.hasMask())
+        assertTrue(controller.logs.any { it.contains("精修贴合：模型命中 1 个候选") })
+    }
+
+    @Test
+    fun fineRefineTrainingFingerprintChangesWhenMaskChanges() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.loadFile(createTwoPartIconFile())
+        val mask = MutableList(16) { 255 }
+        controller.replaceRegions(
+            "manual",
+            listOf(CropRegion("whole", 4, 4, 4, 4, selected = true, maskWidth = 4, maskHeight = 4, alphaMask = mask))
+        )
+        val first = controller.buildFineRefineTrainingFingerprint()
+
+        val changedMask = mask.toMutableList().also { it[5] = 0 }
+        controller.replaceRegions(
+            "manual",
+            listOf(CropRegion("whole", 4, 4, 4, 4, selected = true, maskWidth = 4, maskHeight = 4, alphaMask = changedMask))
+        )
+        val second = controller.buildFineRefineTrainingFingerprint()
+
+        assertFalse(first == second)
     }
 
     @Test
