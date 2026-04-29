@@ -36,10 +36,6 @@ fun AppController.openModelDirectory() {
     openDirectorySafely(AppRuntimeFiles.pythonDir.resolve("model"), "模型目录")
 }
 
-fun AppController.openNativeRuntimeDirectory() {
-    openDirectorySafely(AppRuntimeFiles.runtimeRoot.resolve("native"), "Native 运行目录")
-}
-
 fun AppController.loadFile(file: File) {
     imageFiles = listOf(file)
     currentImageIndex = 0
@@ -58,6 +54,7 @@ private fun AppController.loadFileContent(file: File) {
         rememberRecentFile(file)
         log("图片加载成功：${file.name}，${loaded.width} x ${loaded.height}")
         regenerateBaseSafely(logResult = true)
+        rememberWorkspaceSnapshot()
     }.onFailure {
         log("图片加载失败：${it.message}")
     }
@@ -116,6 +113,7 @@ fun AppController.loadFiles(files: List<File>) {
         backgroundPickArmed = false
         log("多图画布加载成功：${loaded.size} 张，${combined.width} x ${combined.height}，间隔 ${multiImageGap}px")
         regenerateBaseSafely(logResult = true)
+        rememberWorkspaceSnapshot()
     }.onFailure {
         log("多图导入失败：${it.message}")
     }

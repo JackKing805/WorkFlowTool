@@ -18,16 +18,26 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.DropdownMenu
+import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -37,10 +47,14 @@ import androidx.compose.ui.unit.sp
 import io.github.workflowtool.application.AppController
 import io.github.workflowtool.application.clearRegions
 import io.github.workflowtool.application.invertSelection
+import io.github.workflowtool.application.mergeSelectedRegions
 import io.github.workflowtool.application.openOutputDirectory
 import io.github.workflowtool.application.removeRegion
+import io.github.workflowtool.application.selectRegionRange
+import io.github.workflowtool.application.selectRegion
 import io.github.workflowtool.application.selectAll
 import io.github.workflowtool.application.selectAndFocusRegion
+import io.github.workflowtool.application.toggleRegionSelection
 import io.github.workflowtool.application.toggleVisibility
 import io.github.workflowtool.domain.StringKey
 import io.github.workflowtool.model.CropRegion
@@ -48,6 +62,7 @@ import io.github.workflowtool.ui.components.GhostButton
 import io.github.workflowtool.ui.components.PanelCard
 import io.github.workflowtool.ui.components.PrimaryButton
 import io.github.workflowtool.ui.components.ToolButton
+import io.github.workflowtool.ui.isPrimaryShortcutPressed
 import io.github.workflowtool.ui.theme.Border
 import io.github.workflowtool.ui.theme.ControlBg
 import io.github.workflowtool.ui.theme.Danger
@@ -58,6 +73,7 @@ import io.github.workflowtool.ui.theme.TextMuted
 @Composable
 fun RightPanel(controller: AppController, modifier: Modifier = Modifier) {
     val strings = controller.localization
+    var selectionAnchorId by remember { mutableStateOf<String?>(null) }
     Column(modifier.padding(start = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PanelCard("${strings.text(StringKey.RegionsTitle)} ${controller.regions.size}", modifier = Modifier.fillMaxWidth().weight(1f)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -71,7 +87,13 @@ fun RightPanel(controller: AppController, modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 itemsIndexed(controller.regions, key = { _, item -> item.id }) { index, region ->
-                    RegionRow(index, region, controller)
+                    RegionRow(
+                        index = index,
+                        region = region,
+                        controller = controller,
+                        selectionAnchorId = selectionAnchorId,
+                        onSelectionAnchor = { selectionAnchorId = it }
+                    )
                 }
             }
         }
@@ -85,52 +107,120 @@ fun RightPanel(controller: AppController, modifier: Modifier = Modifier) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 @Composable
-fun RegionRow(index: Int, region: CropRegion, controller: AppController) {
-    Row(
-        Modifier.fillMaxWidth()
-            .height(64.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (region.selected) Color(0xFF1E315F) else Color(0xFF131820))
-            .border(1.dp, if (region.selected) Color(0xFF4A7EFF) else SoftBorder, RoundedCornerShape(8.dp))
-            .combinedClickable(
-                onClick = { controller.selectAndFocusRegion(region.id) },
-                onDoubleClick = { controller.selectAndFocusRegion(region.id, fit = true) }
-            )
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            "${index + 1}",
-            color = Color.White,
-            fontSize = 13.sp,
-            maxLines = 1,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.width(22.dp)
-        )
-        Spacer(Modifier.width(6.dp))
-        RegionThumbnail(region, controller, Modifier.width(40.dp).height(40.dp))
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f, fill = true)) {
+fun RegionRow(
+    index: Int,
+    region: CropRegion,
+    controller: AppController,
+    selectionAnchorId: String?,
+    onSelectionAnchor: (String) -> Unit
+) {
+    var menuExpanded by remember(region.id) { mutableStateOf(false) }
+    var ctrlPressed by remember { mutableStateOf(false) }
+    var shiftPressed by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.fillMaxWidth()
+                .height(64.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(if (region.selected) Color(0xFF1E315F) else Color(0xFF131820))
+                .border(1.dp, if (region.selected) Color(0xFF4A7EFF) else SoftBorder, RoundedCornerShape(8.dp))
+                .onPointerEvent(PointerEventType.Press) { event ->
+                    ctrlPressed = isPrimaryShortcutPressed(event.keyboardModifiers)
+                    shiftPressed = event.keyboardModifiers.isShiftPressed
+                    if (!event.buttons.isSecondaryPressed) return@onPointerEvent
+                    menuExpanded = true
+                    event.changes.forEach { it.consume() }
+                }
+                .combinedClickable(
+                    onClick = {
+                        when {
+                            shiftPressed && selectionAnchorId != null -> controller.selectRegionRange(selectionAnchorId, region.id)
+                            ctrlPressed -> controller.toggleRegionSelection(region.id)
+                            else -> controller.selectAndFocusRegion(region.id)
+                        }
+                        onSelectionAnchor(region.id)
+                    },
+                    onDoubleClick = { controller.selectAndFocusRegion(region.id, fit = true) }
+                )
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
-                "${region.width} x ${region.height}",
+                "${index + 1}",
                 color = Color.White,
                 fontSize = 13.sp,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(22.dp)
             )
-            Text(
-                "${region.x}, ${region.y}",
-                color = TextMuted,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Spacer(Modifier.width(6.dp))
+            RegionThumbnail(region, controller, Modifier.width(40.dp).height(40.dp))
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f, fill = true)) {
+                Text(
+                    "${region.width} x ${region.height}",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${region.x}, ${region.y}",
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            RegionVisibilityButton(visible = region.visible, onClick = { controller.toggleVisibility(region.id) })
+            Spacer(Modifier.width(8.dp))
+            RegionDeleteButton(onClick = { controller.removeRegion(region.id) })
         }
-        RegionVisibilityButton(visible = region.visible, onClick = { controller.toggleVisibility(region.id) })
-        Spacer(Modifier.width(8.dp))
-        RegionDeleteButton(onClick = { controller.removeRegion(region.id) })
+        RegionRowContextMenu(
+            expanded = menuExpanded,
+            region = region,
+            selectedCount = controller.regions.count { it.selected && it.visible },
+            onDismiss = { menuExpanded = false },
+            controller = controller
+        )
+    }
+}
+
+@Composable
+private fun RegionRowContextMenu(
+    expanded: Boolean,
+    region: CropRegion,
+    selectedCount: Int,
+    onDismiss: () -> Unit,
+    controller: AppController
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        RegionMenuItem("选中区域", onDismiss) { controller.selectRegion(region.id) }
+        RegionMenuItem("加入多选", onDismiss) { controller.selectRegion(region.id, additive = true) }
+        RegionMenuItem("聚焦区域", onDismiss) { controller.selectAndFocusRegion(region.id, fit = true) }
+        RegionMenuItem("预览区域", onDismiss) { controller.openRegionPreview(region.id) }
+        RegionMenuItem(if (region.visible) "隐藏区域" else "显示区域", onDismiss) { controller.toggleVisibility(region.id) }
+        if (selectedCount >= 2) {
+            RegionMenuItem("合并选中区域", onDismiss) { controller.mergeSelectedRegions() }
+        }
+        RegionMenuItem("删除区域", onDismiss, color = Danger) { controller.removeRegion(region.id) }
+    }
+}
+
+@Composable
+private fun RegionMenuItem(
+    label: String,
+    onDismiss: () -> Unit,
+    color: Color = Color.Unspecified,
+    onClick: () -> Unit
+) {
+    DropdownMenuItem(onClick = {
+        onClick()
+        onDismiss()
+    }) {
+        Text(label, color = color)
     }
 }
 
@@ -218,7 +308,7 @@ private fun RegionDeleteButton(onClick: () -> Unit) {
 
 @Composable
 private fun RegionThumbnail(region: CropRegion, controller: AppController, modifier: Modifier = Modifier) {
-    val bitmap = remember(controller.image, controller.regions, region.x, region.y, region.width, region.height, region.maskWidth, region.maskHeight, region.alphaMask) {
+    val bitmap = remember(controller.image, region.x, region.y, region.width, region.height, region.maskWidth, region.maskHeight, region.alphaMask) {
         controller.image?.let { previewCropper.cropPreview(it, region, controller.regions).toComposeImageBitmap() }
     }
 

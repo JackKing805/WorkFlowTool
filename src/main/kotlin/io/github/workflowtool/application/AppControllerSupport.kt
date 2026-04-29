@@ -99,12 +99,21 @@ fun estimateCornerBackgroundArgb(image: BufferedImage): Int {
         (b / count).toInt()
 }
 
-fun buildTrainingJsonLine(imagePath: String, imageHash: String, regions: List<CropRegion>): String {
+fun buildTrainingJsonLine(
+    imagePath: String,
+    imageHash: String,
+    regions: List<CropRegion>,
+    metadata: Map<String, String> = emptyMap()
+): String {
     val instances = regions.joinToString(",") { region ->
         val mask = region.alphaMask.joinToString(",")
         """{"bbox":{"x":${region.x},"y":${region.y},"width":${region.width},"height":${region.height}},"maskWidth":${region.maskWidth},"maskHeight":${region.maskHeight},"alphaMask":[$mask],"label":"icon"}"""
     }
-    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","instances":[$instances]}"""
+    val metadataJson = metadata.entries.joinToString(",") { (key, value) ->
+        """"${escapeJson(key)}":"${escapeJson(value)}""""
+    }
+    val suffix = if (metadataJson.isBlank()) "" else ""","metadata":{$metadataJson}"""
+    return """{"image":"${escapeJson(imagePath)}","imageHash":"$imageHash","instances":[$instances]$suffix}"""
 }
 
 fun sha256(value: String): String {

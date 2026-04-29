@@ -3,16 +3,18 @@ package io.github.workflowtool.platform
 import io.github.vinceglb.filekit.FileKit
 import io.github.vinceglb.filekit.PlatformFile
 import io.github.vinceglb.filekit.absoluteFile
-import io.github.vinceglb.filekit.picturesDir
 import io.github.vinceglb.filekit.dialogs.FileKitType
 import io.github.vinceglb.filekit.dialogs.openDirectoryPicker
 import io.github.vinceglb.filekit.dialogs.openFilePicker
 import io.github.vinceglb.filekit.dialogs.openFileSaver
 import io.github.vinceglb.filekit.dialogs.openFileWithDefaultApplication
-import java.io.File
-import java.nio.file.Path
+import io.github.vinceglb.filekit.picturesDir
 import kotlinx.coroutines.runBlocking
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.io.path.Path
+import kotlin.io.path.exists
 
 object DesktopPlatform {
     fun defaultOutputDirectory(): Path {
@@ -30,13 +32,11 @@ object DesktopPlatform {
 
     fun chooseDirectory(): File? = runBlocking {
         FileKit.openDirectoryPicker(
-            directory = PlatformFile(defaultOutputDirectory().toString()).absoluteFile()
+            directory = PlatformFile(existingPickerDirectory(defaultOutputDirectory()).toString()).absoluteFile()
         )?.toJavaFile()
     }
 
-    @Suppress("UNUSED_PARAMETER")
     fun chooseSaveFile(
-        title: String,
         suggestedFileName: String,
         initialDirectory: Path? = null
     ): File? = runBlocking {
@@ -46,7 +46,7 @@ object DesktopPlatform {
         FileKit.openFileSaver(
             suggestedName = suggestedName,
             extension = extension,
-            directory = initialDirectory?.let { PlatformFile(it.toString()).absoluteFile() }
+            directory = initialDirectory?.let { PlatformFile(existingPickerDirectory(it).toString()).absoluteFile() }
         )?.toJavaFile()
     }
 
@@ -56,3 +56,11 @@ object DesktopPlatform {
 }
 
 private fun PlatformFile.toJavaFile(): File = file
+
+private fun existingPickerDirectory(path: Path): Path {
+    runCatching { Files.createDirectories(path) }
+    if (path.exists()) return path
+    val home = System.getProperty("user.home")?.let { Path(it) }
+    if (home != null && home.exists()) return home
+    return Path(System.getProperty("java.io.tmpdir"))
+}

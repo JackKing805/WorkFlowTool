@@ -26,41 +26,20 @@ import androidx.compose.ui.unit.sp
 import io.github.workflowtool.ui.theme.Accent
 import io.github.workflowtool.ui.theme.SoftBorder
 import io.github.workflowtool.ui.theme.TopBg
-import java.awt.MouseInfo
 
 @Composable
 fun TopBar(
     title: String,
     onMinimize: () -> Unit,
     onMaximize: () -> Unit,
-    onClose: () -> Unit,
-    onStartWindowDrag: (Int, Int) -> Unit,
-    onDragWindow: (Int, Int) -> Unit,
-    onEndWindowDrag: () -> Unit
+    onClose: () -> Unit
 ) {
     Row(
         Modifier.fillMaxWidth().height(62.dp).background(TopBg),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            Modifier.weight(1f).fillMaxHeight()
-                .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = {
-                            MouseInfo.getPointerInfo()?.location?.let { point ->
-                                onStartWindowDrag(point.x, point.y)
-                            }
-                        },
-                        onDragEnd = onEndWindowDrag,
-                        onDragCancel = onEndWindowDrag
-                    ) { change, _ ->
-                        change.consume()
-                        MouseInfo.getPointerInfo()?.location?.let { point ->
-                            onDragWindow(point.x, point.y)
-                        }
-                    }
-                }
-                .padding(start = 22.dp),
+            Modifier.weight(1f).fillMaxHeight().padding(start = 22.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(

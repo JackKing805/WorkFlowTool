@@ -34,7 +34,11 @@ class PythonDetectorBridgeTest {
                 "regionCount":1,
                 "backgroundSampleCount":24,
                 "totalTimeMs":9,
-                "backend":"mask_rcnn_onnx"
+                "backend":"mask_rcnn_onnx",
+                "maxProbability":0.91,
+                "meanProbability":0.12,
+                "effectiveMaskThreshold":0.28,
+                "thresholdStrategy":"adaptive"
               }
             }
             """.trimIndent()

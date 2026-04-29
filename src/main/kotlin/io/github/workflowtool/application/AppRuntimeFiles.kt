@@ -3,16 +3,11 @@ package io.github.workflowtool.application
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
-import java.util.Comparator
 import java.time.Instant
 import kotlin.io.path.Path
 import kotlin.io.path.exists
 
 internal object AppRuntimeFiles {
-    private val projectRoot: Path
-        get() = Path(System.getProperty("user.dir"))
-
     private val appDataRoot: Path by lazy {
         writableAppDataRoot()
     }
@@ -25,10 +20,6 @@ internal object AppRuntimeFiles {
             installPythonAssets(target)
             return target
         }
-
-    val nativeLibraryFile: File? by lazy {
-        installNativeLibrary()
-    }
 
     private fun installPythonAssets(target: Path) {
         Files.createDirectories(target)
@@ -59,12 +50,13 @@ internal object AppRuntimeFiles {
     fun clearCreatedFiles(): RuntimeCleanupResult {
         val targets = listOf(
             appDataRoot.resolve("python-venv"),
-            appDataRoot.resolve("native"),
             appDataRoot.resolve("python_detector").resolve("training_sets").resolve("combined"),
             appDataRoot.resolve("python_detector").resolve("training_sets").resolve("recent_feedback"),
             appDataRoot.resolve("python_detector").resolve("training_sets").resolve("magic_seed"),
             appDataRoot.resolve("python_detector").resolve("training_sets").resolve("test_actions"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("instance_segmentation"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("instance_segmentation_candidate"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("instance_segmentation_previous"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("combined"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("magic"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("runtime-model-state.json")
@@ -93,43 +85,16 @@ internal object AppRuntimeFiles {
         return candidate.startsWith(root) && candidate != root
     }
 
-    private fun installNativeLibrary(): File? {
-        val libraryName = nativeLibraryName()
-        val target = appDataRoot.resolve("native").resolve(libraryName)
-        return copyResource("native/$libraryName", target, overwrite = true)
-            ?: copyNativeBuildOutput(libraryName, target)
-    }
-
-    private fun copyNativeBuildOutput(libraryName: String, target: Path): File? {
-        val candidates = listOf(
-            projectRoot.resolve("native").resolve("cpp_detector").resolve("build").resolve("release").resolve(libraryName),
-            projectRoot.resolve("native").resolve("cpp_detector").resolve("build").resolve("release").resolve("Release").resolve(libraryName),
-            projectRoot.resolve("native").resolve(libraryName)
-        )
-        val source = candidates.firstOrNull { it.exists() } ?: return null
-        Files.createDirectories(target.parent)
-        return copyFileIfChanged(source, target) ?: existingTargetOrNull(target)
-    }
-
     private fun copyResource(resourcePath: String, target: Path, overwrite: Boolean): File? {
         val stream = AppRuntimeFiles::class.java.classLoader.getResourceAsStream(resourcePath)
         Files.createDirectories(target.parent)
-        if (stream != null) {
-            stream.use { input ->
-                if (overwrite || !target.exists()) {
-                    val bytes = input.readBytes()
-                    copyBytesIfChanged(bytes, target) ?: return existingTargetOrNull(target)
-                    applyExecutableBit(target)
-                }
+        if (stream == null) return null
+        stream.use { input ->
+            if (overwrite || !target.exists()) {
+                val bytes = input.readBytes()
+                copyBytesIfChanged(bytes, target) ?: return existingTargetOrNull(target)
+                applyExecutableBit(target)
             }
-            return target.toFile()
-        }
-
-        val projectFile = Path(System.getProperty("user.dir")).resolve(resourcePath)
-        if (!projectFile.exists()) return null
-        if (overwrite || !target.exists()) {
-            copyFileIfChanged(projectFile, target) ?: return existingTargetOrNull(target)
-            applyExecutableBit(target)
         }
         return target.toFile()
     }
@@ -140,16 +105,6 @@ internal object AppRuntimeFiles {
         }
         return runCatching {
             Files.write(target, bytes)
-            target.toFile()
-        }.getOrNull()
-    }
-
-    private fun copyFileIfChanged(source: Path, target: Path): File? {
-        if (target.exists() && runCatching { Files.mismatch(source, target) == -1L }.getOrDefault(false)) {
-            return target.toFile()
-        }
-        return runCatching {
-            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
             target.toFile()
         }.getOrNull()
     }
@@ -168,10 +123,6 @@ internal object AppRuntimeFiles {
     fun offlineDependencyReport(): OfflineDependencyReport {
         val requirementsFile = pythonDir.resolve("requirements.txt")
         val modelFile = pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.onnx")
-        val nativeProjectFile = projectRoot.resolve("native").resolve(nativeLibraryName())
-        val nativeRuntimeFile = appDataRoot.resolve("native").resolve(nativeLibraryName())
-        val nativePresent = nativeRuntimeFile.exists() || nativeProjectFile.exists() || nativeLibraryFile?.exists() == true
-
         val statuses = listOf(
             OfflineDependencyStatus(
                 name = "Python venv",
@@ -191,11 +142,6 @@ internal object AppRuntimeFiles {
                 name = "runtime model",
                 ok = modelFile.exists(),
                 detail = modelFile.toString()
-            ),
-            OfflineDependencyStatus(
-                name = "native library",
-                ok = nativePresent,
-                detail = listOf(nativeRuntimeFile, nativeProjectFile).joinToString(", ")
             )
         )
         return OfflineDependencyReport(statuses)
@@ -210,29 +156,36 @@ internal object AppRuntimeFiles {
         }
     }
 
-    private fun nativeLibraryName(): String {
-        val os = System.getProperty("os.name")
-        return when {
-            os.startsWith("Mac", ignoreCase = true) -> "libcpp_detector.dylib"
-            os.startsWith("Windows", ignoreCase = true) -> "cpp_detector.dll"
-            else -> "libcpp_detector.so"
+    private fun bundledSeedAssets(): List<String> {
+        val stream = AppRuntimeFiles::class.java.classLoader.getResourceAsStream("python_detector/seed_images_manifest.txt")
+            ?: return emptyList()
+        return stream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+            lines.map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+                .filterNot { it.contains("/__pycache__/") }
+                .filterNot { it.startsWith("training_sets/combined/") || it.startsWith("training_sets/recent_feedback/") }
+                .filterNot { it.endsWith(".svg", ignoreCase = true) }
+                .toList()
         }
     }
 
-    private val pythonAssets = listOf(
+    internal fun bundledPythonAssetsForTest(): List<String> = pythonAssets
+
+    private val pythonAssets: List<String>
+        get() = corePythonAssets + bundledSeedAssets()
+
+    private val corePythonAssets = listOf(
         "offline_common.py",
         "requirements.txt",
         "detect_icons.py",
         "make_training_set.py",
+        "seed_image_annotations.py",
         "train_icon_detector.py",
         "train_background_model.py",
         "README.md",
+        "seed_images_manifest.txt",
         "training_sets/seed_pretrain/annotations.jsonl",
-        "training_sets/background_seed/annotations.jsonl",
-        "seed_images/test.png",
-        "seed_images/icons.png",
-        "seed_images/icons2.png",
-        "seed_images/icons3.png"
+        "training_sets/background_seed/annotations.jsonl"
     )
 
 

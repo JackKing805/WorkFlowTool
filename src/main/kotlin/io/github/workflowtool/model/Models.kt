@@ -40,6 +40,8 @@ data class DetectionConfig(
     val bboxPadding: Int = 1,
     val mergeNearbyRegions: Boolean = true,
     val removeSmallRegions: Boolean = true,
+    val manualRefineExpansionRadius: Int = 4,
+    val manualRefineConflictTolerance: Double = 0.45,
     val useManualBackground: Boolean = false,
     val manualBackgroundArgb: Int = 0
 )
@@ -93,34 +95,12 @@ enum class NamingMode {
     CustomPrefixSequence
 }
 
-enum class SplitSource {
-    AutoDetect,
-    SmartGrid
-}
-
 enum class ToolMode {
     Select,
     Move,
     Draw,
     Eyedropper
 }
-
-data class GridConfig(
-    val cellWidth: Int = 96,
-    val cellHeight: Int = 96,
-    val columns: Int = 8,
-    val rows: Int = 3,
-    val offsetX: Int = 0,
-    val offsetY: Int = 0,
-    val gapX: Int = 0,
-    val gapY: Int = 0,
-    val snapToContent: Boolean = true,
-    val searchPadding: Int = 12,
-    val ignoreEmptyCells: Boolean = true,
-    val trimCellToContent: Boolean = true,
-    val alphaThreshold: Int = 8,
-    val backgroundTolerance: Int = 12
-)
 
 data class ExportResult(
     val successCount: Int,

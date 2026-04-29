@@ -2,59 +2,27 @@
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.DropdownMenu
 import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.ExperimentalComposeUiApi
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.isPrimaryPressed
-import androidx.compose.ui.input.pointer.isSecondaryPressed
-import androidx.compose.ui.input.pointer.onPointerEvent
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.pointerHoverIcon
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.toSize
 import io.github.workflowtool.model.CropRegion
-import io.github.workflowtool.model.ToolMode
 import io.github.workflowtool.ui.theme.Accent
-import io.github.workflowtool.ui.theme.Panel
-import io.github.workflowtool.ui.theme.SoftBorder
-import kotlin.math.abs
 import kotlin.math.roundToInt
-import java.awt.Cursor
-import java.util.UUID
 
 @Composable
 fun EyedropperCursor(position: Offset) {
@@ -106,6 +74,7 @@ fun CanvasContextItem(
 fun RegionNumberBadges(
     regions: List<CropRegion>,
     zoom: Float,
+    zoomY: Float = zoom,
     viewportOffset: Offset,
     hoveredRegionId: String?
 ) {
@@ -124,10 +93,12 @@ fun RegionNumberBadges(
         }
         val textColor = if (selected || hovered) Color.White else Color.White.copy(alpha = 0.8f)
         Box(
-            Modifier.offset(
-                (region.x * zoom + viewportOffset.x + 1).roundToInt().dp,
-                (region.y * zoom + viewportOffset.y + 1).roundToInt().dp
-            )
+            Modifier.offset {
+                IntOffset(
+                    (region.x * zoom + viewportOffset.x + 1).roundToInt(),
+                    (region.y * zoomY + viewportOffset.y + 1).roundToInt()
+                )
+            }
                 .size(size)
                 .clip(CircleShape)
                 .background(badgeColor),
@@ -150,15 +121,12 @@ fun RegionNumberBadges(
 fun CanvasContextMenu(
     state: CanvasContextMenuState,
     regions: List<CropRegion>,
-    latestRegions: List<CropRegion>,
-    maxWidth: Int,
-    maxHeight: Int,
     onDismiss: () -> Unit,
-    onCommit: (String, List<CropRegion>) -> Unit,
     onDeleteRegion: (String) -> Unit,
     onToggleRegionVisibility: (String) -> Unit,
     onFocusRegion: (String, Boolean) -> Unit,
     onOpenRegionPreview: (String) -> Unit,
+    onMergeSelectedRegions: () -> Unit,
     onFitToViewport: () -> Unit,
     onClearRegions: () -> Unit
 ) {
@@ -171,7 +139,7 @@ fun CanvasContextMenu(
             onDismissRequest = onDismiss
         ) {
             if (state.regionId != null) {
-                val targetRegion = regions.lastOrNull { it.id == state.regionId }
+                val selectedVisibleCount = regions.count { it.selected && it.visible }
                 CanvasContextItem("选中区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, false) }
                 CanvasContextItem("聚焦区域", onDismiss = onDismiss) { onFocusRegion(state.regionId, true) }
                 CanvasContextItem("预览区域", onDismiss = onDismiss) { onOpenRegionPreview(state.regionId) }
@@ -180,6 +148,11 @@ fun CanvasContextMenu(
                     onDismiss = onDismiss
                 ) {
                     onToggleRegionVisibility(state.regionId)
+                }
+                if (selectedVisibleCount >= 2) {
+                    CanvasContextItem("合并选中区域", onDismiss = onDismiss) {
+                        onMergeSelectedRegions()
+                    }
                 }
                 CanvasContextItem("删除区域", color = Color(0xFFFF7C74), onDismiss = onDismiss) {
                     onDeleteRegion(state.regionId)

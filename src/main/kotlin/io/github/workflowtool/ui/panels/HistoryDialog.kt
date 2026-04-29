@@ -3,6 +3,7 @@ package io.github.workflowtool.ui.panels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +18,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -167,7 +167,7 @@ private fun HistoryEntryCard(entry: WorkspaceSnapshotEntry, controller: AppContr
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.width(280.dp)
                 )
-                HistoryTag(if (entry.hasManualEdits) "手动修正" else splitSourceLabel(entry))
+                HistoryTag(if (entry.hasManualEdits) "手动修正" else "自动识别")
                 HistoryTag("${entry.sourcePaths.size} 张源图")
             }
             Text(formatHistoryTime(entry.updatedAtEpochMillis), color = TextMuted, fontSize = 12.sp)
@@ -238,9 +238,4 @@ private fun formatHistoryTime(epochMillis: Long): String {
     return Instant.ofEpochMilli(epochMillis)
         .atZone(ZoneId.systemDefault())
         .format(formatter)
-}
-
-private fun splitSourceLabel(entry: WorkspaceSnapshotEntry): String = when (entry.splitSource) {
-    io.github.workflowtool.model.SplitSource.AutoDetect -> "自动识别"
-    io.github.workflowtool.model.SplitSource.SmartGrid -> "智能网格"
 }

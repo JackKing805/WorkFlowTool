@@ -16,8 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run first-run trained ONNX icon segmentation.")
     parser.add_argument("--image", required=True)
     parser.add_argument("--model", default="model/instance_segmentation/model.onnx")
-    parser.add_argument("--score-threshold", type=float, default=0.35)
-    parser.add_argument("--mask-threshold", type=float, default=0.5)
+    parser.add_argument("--score-threshold", type=float, default=0.18)
+    parser.add_argument("--mask-threshold", type=float, default=0.28)
     return parser.parse_args()
 
 
@@ -28,8 +28,11 @@ def main() -> int:
     image_path = Path(args.image)
     model_path = resolve_under(root, args.model)
     metadata = load_metadata(model_path)
-    score_threshold = float(metadata.get("scoreThreshold", args.score_threshold))
-    mask_threshold = float(metadata.get("maskThreshold", args.mask_threshold))
+    learning_config = load_learning_config(model_path)
+    score_threshold = float(learning_config.get("scoreThreshold", metadata.get("scoreThreshold", args.score_threshold)))
+    mask_threshold = float(learning_config.get("maskThreshold", metadata.get("maskThreshold", args.mask_threshold)))
+    min_component_pixels = int(learning_config.get("minComponentPixels", 12))
+    min_alpha = int(learning_config.get("minAlpha", 180))
 
     image = Image.open(image_path).convert("RGBA")
     source_array = np.asarray(image, dtype=np.float32)
@@ -40,14 +43,22 @@ def main() -> int:
     logits = session.run(None, {input_name: image_array})[0]
     probabilities = 1.0 / (1.0 + np.exp(-np.asarray(logits[0, 0], dtype=np.float32)))
     probabilities = probabilities[:source_height, :source_width]
-    mask = probabilities >= mask_threshold
+    mask, effective_mask_threshold, threshold_strategy = build_foreground_mask(probabilities, mask_threshold, learning_config)
     image_pixels = np.asarray(image, dtype=np.uint8)
     background = estimate_edge_background(image_pixels)
     components = extract_components(mask)
     regions = [
         region
         for component in components
-        for region in component_to_regions(component, probabilities, image_pixels, background, score_threshold)
+        for region in component_to_regions(
+            component,
+            probabilities,
+            image_pixels,
+            background,
+            score_threshold,
+            min_component_pixels,
+            min_alpha,
+        )
     ]
     regions.sort(key=lambda region: (region["bbox"]["y"], region["bbox"]["x"]))
     total_time_ms = int(round((time.perf_counter() - started_at) * 1000.0))
@@ -64,6 +75,10 @@ def main() -> int:
                     "backgroundSampleCount": 0,
                     "totalTimeMs": total_time_ms,
                     "backend": "mask_rcnn_onnx",
+                    "maxProbability": round(float(probabilities.max()), 6) if probabilities.size else 0.0,
+                    "meanProbability": round(float(probabilities.mean()), 6) if probabilities.size else 0.0,
+                    "effectiveMaskThreshold": round(float(effective_mask_threshold), 6),
+                    "thresholdStrategy": threshold_strategy,
                 },
             },
             ensure_ascii=False,
@@ -89,6 +104,49 @@ def load_metadata(model_path: Path) -> Dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def load_learning_config(model_path: Path) -> Dict[str, object]:
+    config_path = model_path.parent.parent / "learning-config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        payload = json.loads(config_path.read_text("utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def build_foreground_mask(
+    probabilities: np.ndarray,
+    configured_threshold: float,
+    config: Dict[str, object] | None = None,
+) -> Tuple[np.ndarray, float, str]:
+    config = config or {}
+    threshold = float(np.clip(configured_threshold, 0.05, 0.95))
+    min_pixels = int(np.clip(float(config.get("minComponentPixels", 12)), 6, 24))
+    adaptive_min = float(np.clip(float(config.get("adaptiveMinThreshold", 0.08)), 0.05, 0.14))
+    adaptive_quantile = float(np.clip(float(config.get("adaptiveQuantile", 0.985)), 0.95, 0.995))
+    adaptive_scale = float(np.clip(float(config.get("adaptiveMaxProbabilityScale", 0.72)), 0.60, 0.85))
+    fallback_scale = float(np.clip(float(config.get("adaptiveFallbackScale", 0.55)), 0.45, 0.70))
+    mask = probabilities >= threshold
+    if int(mask.sum()) >= min_pixels:
+        return mask, threshold, "configured"
+
+    max_probability = float(probabilities.max()) if probabilities.size else 0.0
+    mean_probability = float(probabilities.mean()) if probabilities.size else 0.0
+    if max_probability < max(adaptive_min, mean_probability + 0.035):
+        return mask, threshold, "configured-empty"
+
+    adaptive = max(adaptive_min, min(threshold, float(np.quantile(probabilities, adaptive_quantile))))
+    adaptive = min(adaptive, max_probability * adaptive_scale)
+    adaptive_mask = probabilities >= adaptive
+    if int(adaptive_mask.sum()) < min_pixels:
+        adaptive = max(0.06, max_probability * fallback_scale)
+        adaptive_mask = probabilities >= adaptive
+    if int(adaptive_mask.sum()) >= min_pixels:
+        return adaptive_mask, adaptive, "adaptive"
+    return mask, threshold, "configured-empty"
 
 
 def pad_to_multiple(array: np.ndarray, multiple: int) -> np.ndarray:
@@ -134,8 +192,10 @@ def component_to_regions(
     image_pixels: np.ndarray,
     background: Tuple[int, int, int, int],
     score_threshold: float,
+    min_component_pixels: int = 12,
+    min_alpha: int = 180,
 ) -> List[Dict[str, object]]:
-    if len(coords) < 12:
+    if len(coords) < min_component_pixels:
         return []
     xs = [coord[0] for coord in coords]
     ys = [coord[1] for coord in coords]
@@ -153,7 +213,13 @@ def component_to_regions(
     component_mask = np.zeros((height, width), dtype=np.bool_)
     for x, y in coords:
         component_mask[y - top, x - left] = True
-    alpha = refine_alpha_mask(component_mask, probabilities[top:bottom, left:right], image_pixels[top:bottom, left:right], background)
+    alpha = refine_alpha_mask(
+        component_mask,
+        probabilities[top:bottom, left:right],
+        image_pixels[top:bottom, left:right],
+        background,
+        min_alpha,
+    )
     regions: List[Dict[str, object]] = []
     for local_component in extract_components(alpha > 0):
         local_alpha = np.zeros(alpha.shape, dtype=np.uint8)
@@ -164,7 +230,7 @@ def component_to_regions(
             continue
         trim_left, trim_top, region_alpha = trimmed
         region_height, region_width = region_alpha.shape
-        if int((region_alpha > 0).sum()) < 12:
+        if int((region_alpha > 0).sum()) < min_component_pixels:
             continue
         regions.append(
             {
@@ -194,6 +260,7 @@ def refine_alpha_mask(
     probabilities: np.ndarray,
     pixels: np.ndarray,
     background: Tuple[int, int, int, int],
+    min_alpha: int = 180,
 ) -> np.ndarray:
     alpha_channel = pixels[:, :, 3].astype(np.int16)
     transparent_foreground = alpha_channel > 8
@@ -208,7 +275,7 @@ def refine_alpha_mask(
         refined = component_mask
     alpha = np.zeros(component_mask.shape, dtype=np.uint8)
     soft = np.clip(probabilities * 255.0, 0, 255).astype(np.uint8)
-    alpha[refined] = np.maximum(soft[refined], 180)
+    alpha[refined] = np.maximum(soft[refined], np.uint8(np.clip(min_alpha, 0, 255)))
     return alpha
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from offline_common import canonicalize_record, read_jsonl, write_jsonl
+from seed_image_annotations import seed_image_records
 
 
 def main() -> int:
@@ -32,6 +33,7 @@ def main() -> int:
             combined_records.append(record)
             if source_dir.name == "user_feedback":
                 user_feedback_records.append(record)
+    combined_records.extend(seed_image_records(root / "seed_images"))
 
     deduped_combined = dedupe_records(combined_records)
     deduped_recent = dedupe_records(user_feedback_records[-32:])

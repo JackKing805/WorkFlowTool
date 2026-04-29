@@ -5,7 +5,7 @@ import java.nio.file.Path
 import kotlin.io.path.exists
 
 internal object PythonEnvironmentManager {
-    private const val RequiredModelArchitecture = "light_unet_icon_segmentation_v2"
+    private const val RequiredModelArchitecture = "local_unet_icon_segmentation_v3"
     private val requiredModules = listOf("torch", "torchvision", "onnx", "onnxscript", "onnxruntime", "numpy", "PIL")
     private val modelDir: Path
         get() = AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation")
@@ -100,7 +100,11 @@ internal object PythonEnvironmentManager {
                 "--out",
                 "model/instance_segmentation",
                 "--epochs",
-                System.getenv("WORKFLOWTOOL_TRAIN_EPOCHS")?.takeIf { it.isNotBlank() } ?: "8"
+                System.getenv("WORKFLOWTOOL_TRAIN_EPOCHS")?.takeIf { it.isNotBlank() } ?: "10",
+                "--imgsz",
+                System.getenv("WORKFLOWTOOL_TRAIN_IMAGE_SIZE")?.takeIf { it.isNotBlank() } ?: "512",
+                "--batch",
+                System.getenv("WORKFLOWTOOL_TRAIN_BATCH")?.takeIf { it.isNotBlank() } ?: "2"
             )
         ) ?: return EnvironmentStatus(false, "venv python unavailable for model training")
         return runProcess(train, AppRuntimeFiles.pythonDir, "train first-run icon model")

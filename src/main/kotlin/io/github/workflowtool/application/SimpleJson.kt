@@ -21,6 +21,7 @@ internal fun JsonValue.asArray(): JsonValue.JsonArray? = this as? JsonValue.Json
 internal fun JsonValue.asString(): String? = (this as? JsonValue.JsonString)?.value
 internal fun JsonValue.asInt(): Int? = (this as? JsonValue.JsonNumber)?.value?.toDoubleOrNull()?.toInt()
 internal fun JsonValue.asLong(): Long? = (this as? JsonValue.JsonNumber)?.value?.toDoubleOrNull()?.toLong()
+internal fun JsonValue.asDouble(): Double? = (this as? JsonValue.JsonNumber)?.value?.toDoubleOrNull()
 internal fun JsonValue.asFloat(): Float? = (this as? JsonValue.JsonNumber)?.value?.toFloatOrNull()
 internal fun JsonValue.asBoolean(): Boolean? = (this as? JsonValue.JsonBoolean)?.value
 

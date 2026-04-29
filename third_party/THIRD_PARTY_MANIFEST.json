@@ -28,15 +28,6 @@
       "name": "FileKit Dialogs",
       "artifact": "io.github.vinceglb:filekit-dialogs-jvm:0.13.0",
       "license": "MIT"
-    },
-    {
-      "name": "JNA",
-      "artifact": "net.java.dev.jna:jna:5.14.0",
-      "license": "Apache-2.0",
-      "declaredLicenses": [
-        "LGPL-2.1-or-later",
-        "Apache-2.0"
-      ]
     }
   ],
   "pythonDependencies": [
@@ -86,7 +77,8 @@
       "path": "runtime/python_detector/model/instance_segmentation/model.onnx",
       "license": "Generated locally from project/user training data",
       "pretrained": false,
-      "bundled": false
+      "bundled": false,
+      "architecture": "local_unet_icon_segmentation_v3"
     }
   ]
 }

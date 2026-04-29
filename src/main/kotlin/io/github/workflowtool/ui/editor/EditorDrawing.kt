@@ -5,12 +5,22 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.hasMask
 import kotlin.math.floor
 import kotlin.math.max
+
+internal const val CheckerboardCellPx = 16f
+internal const val PixelGridThreshold = 6f
+internal const val PixelGridStrongThreshold = 10f
+internal const val CheckerboardLightArgb = 0xFFF6F7F9.toInt()
+internal const val CheckerboardDarkArgb = 0xFFD8DCE2.toInt()
+internal val CheckerboardLight = Color(CheckerboardLightArgb)
+internal val CheckerboardDark = Color(CheckerboardDarkArgb)
 
 internal data class RegionOverlayStyle(
     val strokeColor: Color,
@@ -20,8 +30,87 @@ internal data class RegionOverlayStyle(
     val strokeWidth: Float
 )
 
+internal data class MaskFillRun(
+    val localY: Int,
+    val startX: Int,
+    val endX: Int,
+    val alpha: Int
+)
+
+internal data class MaskBoundarySegment(
+    val startX: Int,
+    val startY: Int,
+    val endX: Int,
+    val endY: Int
+)
+
+internal data class MaskOverlayGeometry(
+    val fillRuns: List<MaskFillRun>,
+    val boundarySegments: List<MaskBoundarySegment>
+)
+
+internal class MaskOverlayGeometryCache(private val maxEntries: Int = 96) {
+    private data class Key(
+        val maskIdentity: Int,
+        val width: Int,
+        val height: Int,
+        val size: Int
+    )
+
+    private val cache = object : LinkedHashMap<Key, MaskOverlayGeometry>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, MaskOverlayGeometry>): Boolean =
+            size > maxEntries
+    }
+
+    fun geometryFor(region: CropRegion): MaskOverlayGeometry {
+        val key = Key(
+            maskIdentity = System.identityHashCode(region.alphaMask),
+            width = region.maskWidth,
+            height = region.maskHeight,
+            size = region.alphaMask.size
+        )
+        return cache.getOrPut(key) {
+            buildMaskOverlayGeometry(region.alphaMask, region.maskWidth, region.maskHeight)
+        }
+    }
+}
+
+private fun buildMaskOverlayGeometry(mask: List<Int>, width: Int, height: Int): MaskOverlayGeometry {
+    val fillRuns = ArrayList<MaskFillRun>()
+    for (localY in 0 until height) {
+        var localX = 0
+        while (localX < width) {
+            val alpha = mask[localY * width + localX].coerceIn(0, 255)
+            if (alpha <= 0) {
+                localX += 1
+                continue
+            }
+            val startX = localX
+            var endX = localX
+            while (endX + 1 < width && mask[localY * width + endX + 1] > 0) {
+                endX += 1
+            }
+            fillRuns += MaskFillRun(localY = localY, startX = startX, endX = endX, alpha = alpha)
+            localX = endX + 1
+        }
+    }
+
+    val boundarySegments = ArrayList<MaskBoundarySegment>()
+    forEachMaskBoundarySegment(
+        width = width,
+        height = height,
+        isFilled = { x, y -> mask[y * width + x] > 0 }
+    ) { startX, startY, endX, endY ->
+        boundarySegments += MaskBoundarySegment(startX, startY, endX, endY)
+    }
+    return MaskOverlayGeometry(
+        fillRuns = fillRuns,
+        boundarySegments = boundarySegments
+    )
+}
+
 fun DrawScope.drawCheckerboard(size: Size, zoom: Float = 1f, viewportOffset: Offset = Offset.Zero) {
-    val cell = (12f * zoom.coerceIn(0.5f, 4f)).coerceIn(8f, 42f)
+    val cell = CheckerboardCellPx
     val startX = floor(-viewportOffset.x / cell) * cell + viewportOffset.x
     val startY = floor(-viewportOffset.y / cell) * cell + viewportOffset.y
     var y = startY
@@ -31,7 +120,7 @@ fun DrawScope.drawCheckerboard(size: Size, zoom: Float = 1f, viewportOffset: Off
         var column = floor((x - viewportOffset.x) / cell).toInt()
         while (x < size.width) {
             drawRect(
-                color = if ((row + column) % 2 == 0) Color(0xFFBFC4CC) else Color(0xFFE1E4E8),
+                color = if ((row + column) % 2 == 0) CheckerboardDark else CheckerboardLight,
                 topLeft = Offset(x, y),
                 size = Size(cell, cell)
             )
@@ -41,25 +130,23 @@ fun DrawScope.drawCheckerboard(size: Size, zoom: Float = 1f, viewportOffset: Off
         y += cell
         row += 1
     }
-    drawPixelGrid(size, zoom, viewportOffset)
 }
 
-private fun DrawScope.drawPixelGrid(size: Size, zoom: Float, viewportOffset: Offset) {
-    if (zoom < 3f) return
-    val spacing = zoom
-    val alpha = ((zoom - 3f) / 5f).coerceIn(0.10f, 0.26f)
+fun DrawScope.drawPixelGrid(size: Size, zoomX: Float, zoomY: Float = zoomX, viewportOffset: Offset) {
+    if (zoomX < PixelGridThreshold || zoomY < PixelGridThreshold) return
+    val alpha = if (max(zoomX, zoomY) >= PixelGridStrongThreshold) 0.34f else 0.18f
     val color = Color.Black.copy(alpha = alpha)
-    var x = viewportOffset.x % spacing
-    if (x > 0f) x -= spacing
+    var x = viewportOffset.x % zoomX
+    if (x > 0f) x -= zoomX
     while (x <= size.width) {
         drawLine(color, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
-        x += spacing
+        x += zoomX
     }
-    var y = viewportOffset.y % spacing
-    if (y > 0f) y -= spacing
+    var y = viewportOffset.y % zoomY
+    if (y > 0f) y -= zoomY
     while (y <= size.height) {
         drawLine(color, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
-        y += spacing
+        y += zoomY
     }
 }
 
@@ -80,19 +167,21 @@ fun DrawScope.drawGrid(size: Size, zoom: Float, viewportOffset: Offset) {
 internal fun DrawScope.drawRegionOutline(
     region: CropRegion,
     zoom: Float,
+    zoomY: Float = zoom,
     viewportOffset: Offset,
     style: RegionOverlayStyle,
-    antsPhase: Float
+    antsPhase: Float,
+    maskGeometryCache: MaskOverlayGeometryCache
 ) {
     if (region.hasMask()) {
-        drawMaskBackedRegion(region, zoom, viewportOffset, style, antsPhase)
+        drawMaskBackedRegion(region, zoom, zoomY, viewportOffset, style, antsPhase, maskGeometryCache.geometryFor(region))
         return
     }
 
     val left = region.x * zoom + viewportOffset.x
-    val top = region.y * zoom + viewportOffset.y
+    val top = region.y * zoomY + viewportOffset.y
     val right = region.right * zoom + viewportOffset.x
-    val bottom = region.bottom * zoom + viewportOffset.y
+    val bottom = region.bottom * zoomY + viewportOffset.y
     val path = Path().apply {
         moveTo(left, top)
         lineTo(right, top)
@@ -109,12 +198,22 @@ internal fun DrawScope.drawRegionOutline(
         drawPath(
             path = path,
             color = style.secondaryStrokeColor,
-            style = Stroke(width = (style.strokeWidth + 1.2f).coerceAtMost(4.0f), pathEffect = PathEffect.dashPathEffect(dash))
+            style = Stroke(
+                width = (style.strokeWidth + 1.2f).coerceAtMost(4.0f),
+                pathEffect = PathEffect.dashPathEffect(dash),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
         )
         drawPath(
             path = path,
             color = style.strokeColor,
-            style = Stroke(width = style.strokeWidth, pathEffect = PathEffect.dashPathEffect(dash))
+            style = Stroke(
+                width = style.strokeWidth,
+                pathEffect = PathEffect.dashPathEffect(dash),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
         )
     }
 }
@@ -122,76 +221,68 @@ internal fun DrawScope.drawRegionOutline(
 private fun DrawScope.drawMaskBackedRegion(
     region: CropRegion,
     zoom: Float,
+    zoomY: Float,
     viewportOffset: Offset,
     style: RegionOverlayStyle,
-    antsPhase: Float
+    antsPhase: Float,
+    geometry: MaskOverlayGeometry
 ) {
     val baseAlpha = when {
         region.selected -> max(style.fillColor.alpha, 0.18f)
         else -> max(style.fillColor.alpha, 0.08f)
     }
-    for (localY in 0 until region.maskHeight) {
-        var localX = 0
-        while (localX < region.maskWidth) {
-            val alpha = region.alphaMask[localY * region.maskWidth + localX].coerceIn(0, 255)
-            if (alpha <= 0) {
-                localX += 1
-                continue
-            }
-            val startX = localX
-            var endX = localX
-            while (endX + 1 < region.maskWidth && region.alphaMask[localY * region.maskWidth + endX + 1] > 0) {
-                endX += 1
-            }
-            val resolvedAlpha = baseAlpha * (0.60f + 0.40f * (alpha / 255f))
-            drawRect(
-                color = style.fillColor.copy(alpha = resolvedAlpha.coerceIn(0f, 1f)),
-                topLeft = Offset((region.x + startX) * zoom, (region.y + localY) * zoom) + viewportOffset,
-                size = Size((endX - startX + 1) * zoom, zoom)
-            )
-            localX = endX + 1
-        }
+    geometry.fillRuns.forEach { run ->
+        val resolvedAlpha = baseAlpha * (0.60f + 0.40f * (run.alpha / 255f))
+        drawRect(
+            color = style.fillColor.copy(alpha = resolvedAlpha.coerceIn(0f, 1f)),
+            topLeft = Offset((region.x + run.startX) * zoom, (region.y + run.localY) * zoomY) + viewportOffset,
+            size = Size((run.endX - run.startX + 1) * zoom, zoomY)
+        )
     }
 
     if (region.selected) {
-        forEachMaskBoundarySegment(
-            originX = region.x,
-            originY = region.y,
-            width = region.maskWidth,
-            height = region.maskHeight,
-            zoom = zoom,
-            viewportOffset = viewportOffset,
-            isFilled = { x, y -> region.alphaMask[y * region.maskWidth + x] > 0 }
-        ) { start, end ->
-            drawMarchingAntsLine(start = start, end = end, strokeWidth = max(1.25f, style.strokeWidth), phase = antsPhase)
+        geometry.boundarySegments.forEach { segment ->
+            val start = segment.toStartOffset(region, zoom, zoomY, viewportOffset)
+            val end = segment.toEndOffset(region, zoom, zoomY, viewportOffset)
+            drawMarchingAntsLine(start = start, end = end, strokeWidth = max(1.0f, style.strokeWidth), phase = antsPhase)
         }
     } else {
-        forEachMaskBoundarySegment(
-            originX = region.x,
-            originY = region.y,
-            width = region.maskWidth,
-            height = region.maskHeight,
-            zoom = zoom,
-            viewportOffset = viewportOffset,
-            isFilled = { x, y -> region.alphaMask[y * region.maskWidth + x] > 0 }
-        ) { start, end ->
-            drawLine(style.secondaryStrokeColor, start, end, strokeWidth = style.strokeWidth + 0.9f)
-            drawLine(style.strokeColor, start, end, strokeWidth = style.strokeWidth)
+        geometry.boundarySegments.forEach { segment ->
+            val start = segment.toStartOffset(region, zoom, zoomY, viewportOffset)
+            val end = segment.toEndOffset(region, zoom, zoomY, viewportOffset)
+            drawLine(style.secondaryStrokeColor, start, end, strokeWidth = style.strokeWidth + 0.7f, cap = StrokeCap.Square)
+            drawLine(style.strokeColor, start, end, strokeWidth = style.strokeWidth, cap = StrokeCap.Square)
         }
     }
 }
+
+private fun MaskBoundarySegment.toStartOffset(region: CropRegion, zoom: Float, zoomY: Float, viewportOffset: Offset): Offset =
+    Offset((region.x + startX) * zoom, (region.y + startY) * zoomY) + viewportOffset
+
+private fun MaskBoundarySegment.toEndOffset(region: CropRegion, zoom: Float, zoomY: Float, viewportOffset: Offset): Offset =
+    Offset((region.x + endX) * zoom, (region.y + endY) * zoomY) + viewportOffset
 
 private fun DrawScope.drawMarchingAntsPath(path: Path, strokeWidth: Float, phase: Float) {
     val pattern = floatArrayOf(6f, 6f)
     drawPath(
         path = path,
         color = Color.Black.copy(alpha = 0.92f),
-        style = Stroke(width = strokeWidth + 0.2f, pathEffect = PathEffect.dashPathEffect(pattern, phase))
+        style = Stroke(
+            width = strokeWidth + 0.2f,
+            pathEffect = PathEffect.dashPathEffect(pattern, phase),
+            cap = StrokeCap.Round,
+            join = StrokeJoin.Round
+        )
     )
     drawPath(
         path = path,
         color = Color.White.copy(alpha = 0.98f),
-        style = Stroke(width = strokeWidth, pathEffect = PathEffect.dashPathEffect(pattern, phase + pattern.first()))
+        style = Stroke(
+            width = strokeWidth,
+            pathEffect = PathEffect.dashPathEffect(pattern, phase + pattern.first()),
+            cap = StrokeCap.Round,
+            join = StrokeJoin.Round
+        )
     )
 }
 
@@ -202,26 +293,24 @@ private fun DrawScope.drawMarchingAntsLine(start: Offset, end: Offset, strokeWid
         start = start,
         end = end,
         strokeWidth = strokeWidth + 0.25f,
-        pathEffect = PathEffect.dashPathEffect(pattern, phase)
+        pathEffect = PathEffect.dashPathEffect(pattern, phase),
+        cap = StrokeCap.Round
     )
     drawLine(
         color = Color.White.copy(alpha = 0.98f),
         start = start,
         end = end,
         strokeWidth = strokeWidth,
-        pathEffect = PathEffect.dashPathEffect(pattern, phase + pattern.first())
+        pathEffect = PathEffect.dashPathEffect(pattern, phase + pattern.first()),
+        cap = StrokeCap.Round
     )
 }
 
-private inline fun forEachMaskBoundarySegment(
-    originX: Int,
-    originY: Int,
+internal inline fun forEachMaskBoundarySegment(
     width: Int,
     height: Int,
-    zoom: Float,
-    viewportOffset: Offset,
     isFilled: (Int, Int) -> Boolean,
-    onSegment: (Offset, Offset) -> Unit
+    onSegment: (Int, Int, Int, Int) -> Unit
 ) {
     for (localY in 0 until height) {
         var localX = 0
@@ -238,10 +327,7 @@ private inline fun forEachMaskBoundarySegment(
             ) {
                 localX += 1
             }
-            onSegment(
-                Offset((originX + startX) * zoom, (originY + localY) * zoom) + viewportOffset,
-                Offset((originX + localX + 1) * zoom, (originY + localY) * zoom) + viewportOffset
-            )
+            onSegment(startX, localY, localX + 1, localY)
             localX += 1
         }
     }
@@ -261,10 +347,7 @@ private inline fun forEachMaskBoundarySegment(
             ) {
                 localX += 1
             }
-            onSegment(
-                Offset((originX + startX) * zoom, (originY + localY + 1) * zoom) + viewportOffset,
-                Offset((originX + localX + 1) * zoom, (originY + localY + 1) * zoom) + viewportOffset
-            )
+            onSegment(startX, localY + 1, localX + 1, localY + 1)
             localX += 1
         }
     }
@@ -284,10 +367,7 @@ private inline fun forEachMaskBoundarySegment(
             ) {
                 localY += 1
             }
-            onSegment(
-                Offset((originX + localX) * zoom, (originY + startY) * zoom) + viewportOffset,
-                Offset((originX + localX) * zoom, (originY + localY + 1) * zoom) + viewportOffset
-            )
+            onSegment(localX, startY, localX, localY + 1)
             localY += 1
         }
     }
@@ -307,10 +387,7 @@ private inline fun forEachMaskBoundarySegment(
             ) {
                 localY += 1
             }
-            onSegment(
-                Offset((originX + localX + 1) * zoom, (originY + startY) * zoom) + viewportOffset,
-                Offset((originX + localX + 1) * zoom, (originY + localY + 1) * zoom) + viewportOffset
-            )
+            onSegment(localX + 1, startY, localX + 1, localY + 1)
             localY += 1
         }
     }

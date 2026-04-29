@@ -15,46 +15,38 @@ import io.github.workflowtool.domain.LocalizationProvider
 import io.github.workflowtool.domain.NativeImageEngine
 import io.github.workflowtool.domain.RegionDetector
 import io.github.workflowtool.domain.RegionExporter
-import io.github.workflowtool.domain.RegionSplitter
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionMode
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
 import io.github.workflowtool.model.ExportConfig
-import io.github.workflowtool.model.GridConfig
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
-import io.github.workflowtool.model.SplitSource
 import io.github.workflowtool.model.ToolMode
+import io.github.workflowtool.model.hasMask
 import io.github.workflowtool.platform.DesktopPlatform
-import java.awt.image.BufferedImage
-import java.io.File
-import java.nio.file.Files
-import java.nio.file.Path
-import java.security.MessageDigest
-import java.time.LocalDateTime
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
-import javax.imageio.ImageIO
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.awt.image.BufferedImage
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import kotlin.io.path.exists
-import kotlin.math.ceil
-import kotlin.math.sqrt
 
 class AppController(
     private val detector: RegionDetector,
-    private val splitter: RegionSplitter,
     private val exporter: RegionExporter,
     val layoutSpec: LayoutSpec,
     val localization: LocalizationProvider,
     private val layoutPolicy: LayoutConstraintPolicy,
     private val nativeEngine: NativeImageEngine = PythonImageEngine,
     private val previewExporter: IconExporter = IconExporter(),
-    private val persistenceEnabled: Boolean = splitter is CppRegionSplitter && exporter is JvmRegionExporter
+    private val persistenceEnabled: Boolean = exporter is JvmRegionExporter
 ) {
     internal val history = EditorHistory()
     private val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -74,8 +66,6 @@ class AppController(
         internal set
     var image by mutableStateOf<BufferedImage?>(null)
         internal set
-    var splitSource by mutableStateOf(SplitSource.AutoDetect)
-        private set
     var toolMode by mutableStateOf(ToolMode.Select)
         private set
     var zoom by mutableStateOf(1.0f)
@@ -93,8 +83,6 @@ class AppController(
     var sampledBackgroundArgb by mutableStateOf<Int?>(null)
         private set
     var backgroundPickArmed by mutableStateOf(false)
-        internal set
-    var gridConfig by mutableStateOf(GridConfig())
         internal set
     var outputDirectory by mutableStateOf(DesktopPlatform.defaultOutputDirectory())
         internal set
@@ -158,21 +146,12 @@ class AppController(
     val canRedo: Boolean get() = history.canRedo
     val isBusy: Boolean get() = busyMessage != null
     val isAutoDetectAvailable: Boolean get() = nativeEngine.isAvailable
-    val isGridSplitAvailable: Boolean get() = CppDetectorBridge.isLoaded
-    val canRegenerateBase: Boolean
-        get() = when (splitSource) {
-            SplitSource.AutoDetect -> isAutoDetectAvailable
-            SplitSource.SmartGrid -> isGridSplitAvailable
-        }
+    val canRegenerateBase: Boolean get() = isAutoDetectAvailable
     val selectedRegion: CropRegion?
         get() = regions.lastOrNull { it.selected }
     val previewRegion: CropRegion?
         get() = previewRegionId?.let { id -> regions.lastOrNull { it.id == id } }
-    val baseSourceLabel: String
-        get() = when (splitSource) {
-            SplitSource.AutoDetect -> "自动识别"
-            SplitSource.SmartGrid -> "智能网格"
-        }
+    val baseSourceLabel: String get() = "自动识别"
     val manualStatusLabel: String
         get() = if (hasManualEdits) "已修改" else "未修改"
     val currentRegionSourceLabel: String
@@ -202,7 +181,13 @@ class AppController(
     val hoverPositionLabel: String
         get() = hoveredImagePoint?.let { "${it.x.toInt()}, ${it.y.toInt()}" } ?: "-"
     val selectedRegionLabel: String
-        get() = selectedRegion?.let { "${it.x}, ${it.y}, ${it.width} x ${it.height}" } ?: "-"
+        get() {
+            val selectedCount = regions.count { it.selected }
+            return when {
+                selectedCount > 1 -> "已选 $selectedCount 个"
+                else -> selectedRegion?.let { "${it.x}, ${it.y}, ${it.width} x ${it.height}" } ?: "-"
+            }
+        }
     val runtimeStatusLabel: String
         get() = "${runtimePreparationStage.label}：$runtimePreparationMessage"
 
@@ -277,29 +262,12 @@ class AppController(
         val loaded = image ?: return
         val detected = detector.detect(loaded, effectiveDetectionConfig())
         lastDetectionResult = detected
-        applyBaseGeneration(SplitSource.AutoDetect, detected.regions, logResult, "自动识别")
+        applyBaseGeneration(detected.regions, logResult, "自动识别")
     }
 
     fun rebuildFromAutoAsync(logResult: Boolean = false) {
         runBusy("正在自动识别区域...") {
             rebuildFromAuto(logResult)
-        }
-    }
-
-    fun rebuildFromSmartGrid(logResult: Boolean = false) {
-        val loaded = image ?: return
-        val generated = splitter.split(loaded, gridConfig)
-        lastDetectionResult = DetectionResult(
-            regions = generated,
-            mode = DetectionMode.FALLBACK_BACKGROUND,
-            stats = DetectionStats(0, 0, generated.size, generated.size, 0, 0)
-        )
-        applyBaseGeneration(SplitSource.SmartGrid, generated, logResult, "智能网格")
-    }
-
-    fun rebuildFromSmartGridAsync(logResult: Boolean = false) {
-        runBusy("正在智能拆分区域...") {
-            rebuildFromSmartGrid(logResult)
         }
     }
 
@@ -348,10 +316,9 @@ class AppController(
         log("已重置手工修正，当前选框来源：$currentRegionSourceLabel")
     }
 
-    private fun applyBaseGeneration(source: SplitSource, generated: List<CropRegion>, logResult: Boolean, sourceLabel: String) {
+    private fun applyBaseGeneration(generated: List<CropRegion>, logResult: Boolean, sourceLabel: String) {
         val normalized = normalizeRegionIds(generated).mapNotNull { clampRegionToImage(it) }
-        if (source == splitSource && normalized == baseRegions && !hasManualEdits) return
-        splitSource = source
+        if (normalized == baseRegions && !hasManualEdits) return
         baseRegions = normalized
         history.reset(normalized)
         hasManualEdits = false
@@ -415,7 +382,6 @@ class AppController(
             return
         }
         val destination = targetPath ?: DesktopPlatform.chooseSaveFile(
-            title = "Export preview",
             suggestedFileName = suggestedPreviewFileName(file, region),
             initialDirectory = outputDirectory
         )?.toPath()
@@ -436,6 +402,12 @@ class AppController(
             log("预览区域已导出：${destination.fileName}")
         }.onFailure {
             log("预览区域导出失败：${it.message}")
+        }
+    }
+
+    fun exportPreviewRegionAsync(regionId: String) {
+        runBusy("正在导出预览区域...") {
+            exportPreviewRegion(regionId)
         }
     }
 
@@ -561,16 +533,28 @@ class AppController(
             updatedAtEpochMillis = System.currentTimeMillis(),
             imageWidth = loaded.width,
             imageHeight = loaded.height,
-            splitSource = splitSource,
             hasManualEdits = hasManualEdits,
             baseRegions = snapshotRegions(baseRegions),
             regions = snapshotRegions(regions)
         )
-        workspaceHistoryEntries = WorkspaceHistoryStore.upsert(
-            existing = workspaceHistoryEntries,
-            entry = entry,
-            preview = buildWorkspaceSnapshotPreview(loaded, entry.regions)
-        )
+        runCatching {
+            WorkspaceHistoryStore.upsert(
+                existing = workspaceHistoryEntries,
+                entry = entry,
+                preview = buildWorkspaceSnapshotPreview(
+                    image = loaded,
+                    regions = regions,
+                    zoom = zoom,
+                    viewportOffset = viewportOffset,
+                    viewportSize = viewportSize,
+                    showGrid = showGrid
+                )
+            )
+        }.onSuccess {
+            workspaceHistoryEntries = it
+        }.onFailure {
+            log("历史记录保存失败：${it.message ?: it::class.simpleName}")
+        }
     }
 
     internal fun persistSettings() {
@@ -578,7 +562,6 @@ class AppController(
         AppSettingsStore.save(
             AppSettings(
                 detectionConfig = detectionConfig,
-                gridConfig = gridConfig,
                 outputDirectory = outputDirectory,
                 outputFormat = outputFormat,
                 namingMode = namingMode,
@@ -599,7 +582,6 @@ class AppController(
 
     private fun applyPersistedSettings(settings: AppSettings) {
         detectionConfig = settings.detectionConfig
-        gridConfig = settings.gridConfig
         settings.outputDirectory?.let { outputDirectory = it }
         outputFormat = settings.outputFormat
         namingMode = settings.namingMode
@@ -640,13 +622,10 @@ class AppController(
 
     internal fun regenerateBaseSafely(logResult: Boolean) {
         runCatching {
-            when (splitSource) {
-                SplitSource.AutoDetect -> rebuildFromAuto(logResult = logResult)
-                SplitSource.SmartGrid -> rebuildFromSmartGrid(logResult = logResult)
-            }
+            rebuildFromAuto(logResult = logResult)
         }.onFailure {
             lastDetectionResult = emptyDetectionResult()
-            applyBaseGeneration(splitSource, emptyList(), false, baseSourceLabel)
+            applyBaseGeneration(emptyList(), false, baseSourceLabel)
             log("图片已导入，但自动识别失败：${it.message ?: it::class.simpleName}")
         }
     }
@@ -707,12 +686,11 @@ class AppController(
     private fun restoreHistorySnapshot(snapshot: WorkspaceSnapshotEntry) {
         val restoredBase = normalizeSnapshotRegions(snapshot.baseRegions)
         val restoredRegions = normalizeSnapshotRegions(snapshot.regions).ifEmpty { restoredBase }
-        splitSource = snapshot.splitSource
         baseRegions = restoredBase.ifEmpty { restoredRegions }
         history.reset(restoredRegions)
         lastDetectionResult = DetectionResult(
             regions = restoredBase.ifEmpty { restoredRegions },
-            mode = snapshot.splitSource.toDetectionMode(),
+            mode = DetectionMode.FALLBACK_BACKGROUND,
             stats = DetectionStats(0, 0, restoredRegions.size, restoredBase.size, 0, 0)
         )
         previewRegionId = null
@@ -743,12 +721,6 @@ class AppController(
     private fun normalizeSnapshotRegions(input: List<CropRegion>): List<CropRegion> =
         normalizeRegionIds(snapshotRegions(input)).mapNotNull { clampRegionToImage(it) }
 
-    private fun SplitSource.toDetectionMode(): DetectionMode =
-        when (this) {
-            SplitSource.AutoDetect -> DetectionMode.FALLBACK_BACKGROUND
-            SplitSource.SmartGrid -> DetectionMode.FALLBACK_BACKGROUND
-        }
-
     internal fun openDirectorySafely(path: Path, label: String) {
         runCatching {
             Files.createDirectories(path)
@@ -764,24 +736,10 @@ class AppController(
         return "${base}_region_${region.id}.${outputFormat.extension}"
     }
 
-    private fun detectInsideRegion(region: CropRegion) {
+    internal fun detectInsideRegion(region: CropRegion) {
         val loaded = image ?: return
         val clamped = clampRegionToImage(region) ?: return
-        val crop = BufferedImage(clamped.width, clamped.height, BufferedImage.TYPE_INT_ARGB)
-        val graphics = crop.createGraphics()
-        graphics.drawImage(
-            loaded,
-            0,
-            0,
-            clamped.width,
-            clamped.height,
-            clamped.x,
-            clamped.y,
-            clamped.right,
-            clamped.bottom,
-            null
-        )
-        graphics.dispose()
+        val crop = cropImageRegion(loaded, clamped)
         val detected = detector.detect(crop, effectiveDetectionConfig())
         val shifted = detected.regions.map { detectedRegion ->
             detectedRegion.copy(
@@ -791,13 +749,131 @@ class AppController(
             )
         }.mapNotNull { clampRegionToImage(it) }
         lastDetectionResult = detected.copy(regions = shifted)
-        val additions = shifted.ifEmpty { listOf(clamped.copy(selected = true)) }
+        val addition = if (shifted.isNotEmpty()) {
+            mergeRegionsToOuterMask(loaded.width, loaded.height, shifted, clamped.id)
+                ?.copy(selected = true)
+                ?: shifted.first().copy(selected = true)
+        } else {
+            snapUserRegionToForeground(clamped)
+                ?: clamped.copy(selected = true)
+        }
         replaceRegions(
             "框选自动识别",
-            regions.map { it.copy(selected = false) } + additions
+            regions.map { it.copy(selected = false) } + addition
         )
-        splitSource = SplitSource.AutoDetect
-        log("框选自动识别生成 ${shifted.size} 个区域")
+        if (shifted.isEmpty()) {
+            if (addition.hasMask()) {
+                log("框选自动识别未生成区域，已将框选范围自动贴合图标边缘")
+            } else {
+                log("框选自动识别未生成区域，已将框选范围作为图标区域")
+            }
+        } else {
+            log("框选自动识别生成 ${shifted.size} 个区域，已合并贴合为单个区域")
+        }
+    }
+
+    internal fun redetectUserRegionAsWhole(region: CropRegion): CropRegion? {
+        val loaded = image ?: return null
+        val clamped = clampRegionToImage(region) ?: return null
+        val config = effectiveDetectionConfig()
+        val backgroundArgb = foregroundSnapBackgroundArgb(loaded)
+        val crop = cropImageRegion(loaded, clamped)
+        val detected = detector.detect(crop, config)
+        val shifted = detected.regions.map { detectedRegion ->
+            detectedRegion.copy(
+                x = detectedRegion.x + clamped.x,
+                y = detectedRegion.y + clamped.y,
+                selected = true
+            )
+        }.mapNotNull { clampRegionToImage(it) }
+        lastDetectionResult = detected.copy(regions = shifted)
+        val candidate = buildWholeRegionCandidate(
+            loaded = loaded,
+            shifted = shifted,
+            config = config,
+            backgroundArgb = backgroundArgb,
+            mode = lastDetectionResult.mode,
+            constrainToUserMask = clamped.hasMask() && clamped.alphaMask.any { it <= 0 }
+        )
+        return constrainedRefineUserRegion(
+            image = loaded,
+            region = clamped.copy(selected = true),
+            candidate = candidate,
+            config = config,
+            backgroundArgb = backgroundArgb,
+            mode = lastDetectionResult.mode
+        )?.copy(id = clamped.id, visible = clamped.visible, selected = true, score = clamped.score)
+    }
+
+    internal fun snapUserRegionToForeground(region: CropRegion): CropRegion? {
+        val loaded = image ?: return null
+        val clamped = clampRegionToImage(region) ?: return null
+        return snapRegionToForeground(
+            image = loaded,
+            region = clamped.copy(selected = true),
+            config = effectiveDetectionConfig(),
+            backgroundArgb = foregroundSnapBackgroundArgb(loaded),
+            mode = lastDetectionResult.mode
+        )?.copy(id = clamped.id, visible = clamped.visible, selected = true, score = clamped.score)
+    }
+
+    internal fun snapUserRegionToForegroundWhole(region: CropRegion): CropRegion? {
+        val loaded = image ?: return null
+        val clamped = clampRegionToImage(region) ?: return null
+        return snapRegionToForegroundWhole(
+            image = loaded,
+            region = clamped.copy(selected = true),
+            config = effectiveDetectionConfig(),
+            backgroundArgb = foregroundSnapBackgroundArgb(loaded),
+            mode = lastDetectionResult.mode
+        )?.copy(id = clamped.id, visible = clamped.visible, selected = true, score = clamped.score)
+    }
+
+    private fun buildWholeRegionCandidate(
+        loaded: BufferedImage,
+        shifted: List<CropRegion>,
+        config: DetectionConfig,
+        backgroundArgb: Int,
+        mode: DetectionMode,
+        constrainToUserMask: Boolean
+    ): CropRegion? {
+        if (shifted.isEmpty()) return null
+        val prepared = if (constrainToUserMask) {
+            shifted.map { detectedRegion ->
+                if (detectedRegion.hasMask()) {
+                    detectedRegion
+                } else {
+                    snapRegionToForeground(loaded, detectedRegion, config, backgroundArgb, mode) ?: detectedRegion
+                }
+            }
+        } else {
+            shifted
+        }
+        return mergeRegionsToOuterMask(loaded.width, loaded.height, prepared, shifted.first().id)
+    }
+
+    private fun foregroundSnapBackgroundArgb(loaded: BufferedImage): Int =
+        sampledBackgroundArgb
+            ?: lastDetectionResult.stats.estimatedBackgroundArgb.takeIf { it != 0 }
+            ?: estimateCornerBackgroundArgb(loaded)
+
+    private fun cropImageRegion(loaded: BufferedImage, region: CropRegion): BufferedImage {
+        val crop = BufferedImage(region.width, region.height, BufferedImage.TYPE_INT_ARGB)
+        val graphics = crop.createGraphics()
+        graphics.drawImage(
+            loaded,
+            0,
+            0,
+            region.width,
+            region.height,
+            region.x,
+            region.y,
+            region.right,
+            region.bottom,
+            null
+        )
+        graphics.dispose()
+        return crop
     }
 
 }

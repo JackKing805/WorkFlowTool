@@ -64,6 +64,93 @@ class IconExporterTest {
     }
 
     @Test
+    fun maskedExportPreservesExactAlphaMaskValues() {
+        val image = BufferedImage(4, 4, BufferedImage.TYPE_INT_ARGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color.RED
+        graphics.fillRect(0, 0, 4, 4)
+        graphics.dispose()
+        val output = Files.createTempDirectory("icon-export-alpha-mask-test")
+        val region = CropRegion(
+            id = "mask",
+            x = 0,
+            y = 0,
+            width = 4,
+            height = 4,
+            maskWidth = 4,
+            maskHeight = 4,
+            alphaMask = listOf(
+                255, 0, 128, 0,
+                0, 64, 0, 0,
+                0, 0, 220, 0,
+                0, 0, 0, 255
+            )
+        )
+
+        val result = IconExporter().export(
+            image = image,
+            sourceFileName = "icons.png",
+            regions = listOf(region),
+            config = ExportConfig(
+                outputDirectory = output,
+                namingMode = NamingMode.Sequence,
+                overwriteExisting = true
+            )
+        )
+
+        assertEquals(1, result.successCount)
+        val exported = ImageIO.read(output.resolve("001.png").toFile())
+        assertEquals(255, exported.getRGB(0, 0) ushr 24)
+        assertEquals(0, exported.getRGB(1, 0) ushr 24)
+        assertEquals(128, exported.getRGB(2, 0) ushr 24)
+        assertEquals(64, exported.getRGB(1, 1) ushr 24)
+        assertEquals(220, exported.getRGB(2, 2) ushr 24)
+        assertEquals(255, exported.getRGB(3, 3) ushr 24)
+    }
+
+    @Test
+    fun trimTransparentPaddingUsesExactVisibleAlphaBounds() {
+        val image = BufferedImage(6, 6, BufferedImage.TYPE_INT_ARGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color.BLUE
+        graphics.fillRect(0, 0, 6, 6)
+        graphics.dispose()
+        val output = Files.createTempDirectory("icon-export-trim-mask-test")
+        val mask = MutableList(36) { 0 }
+        mask[2 * 6 + 3] = 128
+        mask[4 * 6 + 5] = 255
+        val region = CropRegion(
+            id = "mask",
+            x = 0,
+            y = 0,
+            width = 6,
+            height = 6,
+            maskWidth = 6,
+            maskHeight = 6,
+            alphaMask = mask
+        )
+
+        val result = IconExporter().export(
+            image = image,
+            sourceFileName = "icons.png",
+            regions = listOf(region),
+            config = ExportConfig(
+                outputDirectory = output,
+                namingMode = NamingMode.Sequence,
+                overwriteExisting = true,
+                trimTransparentPadding = true
+            )
+        )
+
+        assertEquals(1, result.successCount)
+        val exported = ImageIO.read(output.resolve("001.png").toFile())
+        assertEquals(3, exported.width)
+        assertEquals(3, exported.height)
+        assertEquals(128, exported.getRGB(0, 0) ushr 24)
+        assertEquals(255, exported.getRGB(2, 2) ushr 24)
+    }
+
+    @Test
     fun removesConfiguredBackgroundColorToTransparency() {
         val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_ARGB)
         val graphics = image.createGraphics()
@@ -95,7 +182,7 @@ class IconExporterTest {
     }
 
     @Test
-    fun removesOnlyEdgeConnectedBackgroundAndKeepsEnclosedInteriorTexture() {
+    fun removesConfiguredBackgroundColorEvenWhenInteriorIsEnclosed() {
         val image = BufferedImage(18, 18, BufferedImage.TYPE_INT_ARGB)
         val background = Color(0x57, 0xD7, 0x45)
         val graphics = image.createGraphics()
@@ -128,8 +215,53 @@ class IconExporterTest {
         assertEquals(1, result.successCount)
         val exported = ImageIO.read(output.resolve("001.png").toFile())
         assertEquals(0, exported.getRGB(1, 1) ushr 24)
-        assertEquals(255, exported.getRGB(8, 8) ushr 24)
+        assertEquals(0, exported.getRGB(8, 8) ushr 24)
         assertEquals(255, exported.getRGB(5, 5) ushr 24)
+    }
+
+    @Test
+    fun removesInteriorBackgroundPixelsWhenExportingMaskRefinedRegion() {
+        val image = BufferedImage(18, 18, BufferedImage.TYPE_INT_ARGB)
+        val background = Color(0x57, 0xD7, 0x45)
+        val graphics = image.createGraphics()
+        graphics.color = background
+        graphics.fillRect(0, 0, 18, 18)
+        graphics.color = Color(0x4A, 0x2B, 0x1E)
+        graphics.fillRect(4, 4, 10, 2)
+        graphics.fillRect(4, 12, 10, 2)
+        graphics.fillRect(4, 4, 2, 10)
+        graphics.fillRect(12, 4, 2, 10)
+        graphics.dispose()
+        val output = Files.createTempDirectory("icon-export-mask-background-test")
+        val region = CropRegion(
+            id = "mask",
+            x = 3,
+            y = 3,
+            width = 12,
+            height = 12,
+            maskWidth = 12,
+            maskHeight = 12,
+            alphaMask = List(12 * 12) { 255 }
+        )
+
+        val result = IconExporter().export(
+            image = image,
+            sourceFileName = "bed.png",
+            regions = listOf(region),
+            config = ExportConfig(
+                outputDirectory = output,
+                namingMode = NamingMode.Sequence,
+                overwriteExisting = true,
+                removeBackgroundToTransparent = true,
+                backgroundArgb = background.rgb,
+                backgroundTolerance = 2
+            )
+        )
+
+        assertEquals(1, result.successCount)
+        val exported = ImageIO.read(output.resolve("001.png").toFile())
+        assertEquals(0, exported.getRGB(5, 5) ushr 24)
+        assertEquals(255, exported.getRGB(2, 2) ushr 24)
     }
 
     @Test

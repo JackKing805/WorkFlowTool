@@ -3,6 +3,7 @@
 import io.github.workflowtool.model.ExportConfig
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import javax.imageio.ImageIO
@@ -22,7 +23,17 @@ fun AppController.appendTrainingSample(sourceLabel: String): Boolean {
         val targetName = "${timestamp}_${safeName}.png"
         val target = imagesDir.resolve(targetName)
         check(ImageIO.write(loaded, "png", target.toFile())) { "训练样本图片写入失败" }
-        val line = buildTrainingJsonLine("images/$targetName", imagePixelHash(loaded), visibleRegions)
+        val line = buildTrainingJsonLine(
+            "images/$targetName",
+            imagePixelHash(loaded),
+            visibleRegions,
+            mapOf(
+                "source" to sourceLabel,
+                "learningMode" to "confirmed_manual_edit",
+                "createdAt" to LocalDateTime.now().toString(),
+                "regionCount" to visibleRegions.size.toString()
+            )
+        )
         Files.writeString(
             datasetRoot.resolve("annotations.jsonl"),
             line + System.lineSeparator(),
@@ -70,11 +81,12 @@ fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
         setTrainingBusyMessage("正在合并本地训练样本...")
         val makeDataset = runPythonCommand("make_training_set.py")
         check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
+        val learningConfig = loadLearningConfig()
 
         trainAndPromoteIconModel(
             dataset = "training_sets/combined",
-            epochs = "4",
-            batch = "2"
+            epochs = learningConfig.fullRetrainEpochs.toString(),
+            batch = learningConfig.fullBatch.toString()
         )
         log("图标模型已根据本地训练样本重建")
         true
@@ -87,28 +99,39 @@ fun AppController.retrainContinuousModels(update: ContinuousTrainingUpdate): Boo
     return runCatching {
         setTrainingBusyMessage("正在用本次结果更新模型...")
         if (update.icon) {
+            val learningConfig = loadLearningConfig()
             val makeDataset = runPythonCommand("make_training_set.py")
             check(makeDataset.exitCode == 0) { makeDataset.output.ifBlank { "训练集生成失败" } }
             val recentManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("recent_feedback").resolve("annotations.jsonl")
             var iconModelUpdated = false
             if (shouldRunFullIconRetrain()) {
-                iconModelUpdated = trainAndPromoteIconModel(
+                iconModelUpdated = trainCandidateAndPromoteIconModel(
                     dataset = "training_sets/combined",
-                    epochs = "4",
-                    batch = "2"
+                    epochs = learningConfig.fullRetrainEpochs.toString(),
+                    batch = learningConfig.fullBatch.toString(),
+                    resume = false
                 )
             }
-            if (recentManifest.exists()) {
-                iconModelUpdated = trainAndPromoteIconModel(
+            if (recentManifest.exists() && shouldRunRecentIconFineTune()) {
+                iconModelUpdated = trainCandidateAndPromoteIconModel(
                     dataset = "training_sets/recent_feedback",
-                    epochs = "2",
-                    batch = "1"
+                    epochs = learningConfig.recentFineTuneEpochs.toString(),
+                    batch = learningConfig.recentBatch.toString(),
+                    resume = true
                 )
             }
-            if (iconModelUpdated) AppRuntimeFiles.markUserModelUpdated()
+            if (iconModelUpdated) {
+                AppRuntimeFiles.markUserModelUpdated()
+                evolveLearningConfigAfterFeedback()?.let { evolution ->
+                    log("模型参数已自适应更新：${evolution.summary()}")
+                }
+            }
+            if (!iconModelUpdated) {
+                log("持续学习样本已记录：等待更多确认样本后训练")
+            }
         }
         if (update.background) trainBackgroundModelIfNeeded()
-        log("持续学习模型已更新，下次识别会使用新模型")
+        log("持续学习处理完成")
         true
     }.onFailure {
         log("持续学习模型更新失败：${it.message}")
@@ -120,22 +143,51 @@ fun AppController.trainAndPromoteIconModel(
     epochs: String,
     batch: String
 ): Boolean {
+    return trainCandidateAndPromoteIconModel(dataset, epochs, batch, resume = false)
+}
+
+fun AppController.trainCandidateAndPromoteIconModel(
+    dataset: String,
+    epochs: String,
+    batch: String,
+    resume: Boolean
+): Boolean {
     setTrainingBusyMessage("正在训练图标模型...")
+    val pythonDir = AppRuntimeFiles.pythonDir
+    val learningConfig = loadLearningConfig()
+    val activeDir = pythonDir.resolve("model").resolve("instance_segmentation")
+    val candidateDir = pythonDir.resolve("model").resolve("instance_segmentation_candidate")
+    deleteDirectory(candidateDir)
     val train = runPythonCommand(
         "train_icon_detector.py",
         "--dataset",
         dataset,
         "--out",
-        "model/instance_segmentation",
+        "model/instance_segmentation_candidate",
         "--epochs",
         epochs,
         "--imgsz",
         "512",
         "--batch",
-        batch
+        batch,
+        "--lr",
+        (if (resume) learningConfig.fineTuneLearningRate else learningConfig.learningRate).toString(),
+        "--bce-weight",
+        learningConfig.bceWeight.toString(),
+        "--dice-weight",
+        learningConfig.diceWeight.toString(),
+        "--focal-weight",
+        learningConfig.focalWeight.toString(),
+        "--score-threshold",
+        learningConfig.scoreThreshold.toString(),
+        "--mask-threshold",
+        learningConfig.maskThreshold.toString(),
+        *resumeArgs(activeDir, resume).toTypedArray()
     )
     check(train.exitCode == 0) { train.output.ifBlank { "图标模型训练失败" } }
+    check(candidateModelLooksUsable(candidateDir)) { "候选图标模型验证失败，已保留当前模型" }
 
+    promoteCandidateModel(activeDir, candidateDir)
     AppRuntimeFiles.markUserModelUpdated()
     log("图标模型已更新：$dataset")
     return true
@@ -161,6 +213,52 @@ fun shouldRunFullIconRetrain(): Boolean {
         Files.readAllLines(feedbackManifest, Charsets.UTF_8).count { it.isNotBlank() }
     }.getOrDefault(0)
     return sampleCount <= 2 || sampleCount % 5 == 0
+}
+
+fun shouldRunRecentIconFineTune(): Boolean {
+    val feedbackManifest = AppRuntimeFiles.pythonDir.resolve("training_sets").resolve("user_feedback").resolve("annotations.jsonl")
+    if (!feedbackManifest.exists()) return false
+    val sampleCount = runCatching {
+        Files.readAllLines(feedbackManifest, Charsets.UTF_8).count { it.isNotBlank() }
+    }.getOrDefault(0)
+    return sampleCount <= 2 || sampleCount % 3 == 0
+}
+
+fun resumeArgs(activeDir: Path, resume: Boolean): List<String> {
+    val weights = activeDir.resolve("model.pt")
+    return if (resume && weights.exists()) listOf("--resume", "model/instance_segmentation/model.pt") else emptyList()
+}
+
+fun candidateModelLooksUsable(candidateDir: Path): Boolean {
+    val weights = candidateDir.resolve("model.pt")
+    val onnx = candidateDir.resolve("model.onnx")
+    val manifest = candidateDir.resolve("model.json")
+    if (!weights.exists() || !onnx.exists() || !manifest.exists()) return false
+    val learningConfig = loadLearningConfig()
+    val text = runCatching { Files.readString(manifest, Charsets.UTF_8) }.getOrDefault("")
+    val maxProbability = Regex(""""maxProbability"\s*:\s*([0-9.]+)""").find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+    val foregroundRatio = Regex(""""predictedForegroundRatio"\s*:\s*([0-9.]+)""").find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+    return maxProbability != null &&
+        foregroundRatio != null &&
+        maxProbability >= learningConfig.scoreThreshold &&
+        foregroundRatio > 0.00001
+}
+
+fun promoteCandidateModel(activeDir: Path, candidateDir: Path) {
+    val backupDir = activeDir.parent.resolve("instance_segmentation_previous")
+    deleteDirectory(backupDir)
+    if (activeDir.exists()) {
+        Files.createDirectories(backupDir.parent)
+        Files.move(activeDir, backupDir, StandardCopyOption.REPLACE_EXISTING)
+    }
+    Files.move(candidateDir, activeDir, StandardCopyOption.REPLACE_EXISTING)
+}
+
+fun deleteDirectory(path: Path) {
+    if (!path.exists()) return
+    Files.walk(path).use { stream ->
+        stream.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+    }
 }
 
 fun AppController.buildTrainingFingerprint(config: ExportConfig): String {

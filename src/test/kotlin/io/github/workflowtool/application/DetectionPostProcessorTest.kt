@@ -142,4 +142,51 @@ class DetectionPostProcessorTest {
         assertTrue(region.maskAlphaAt(7, 7) > 0)
         assertTrue(region.maskAlphaAt(10, 10) > 0)
     }
+
+    @Test
+    fun constrainedRefineKeepsUserCutoutWhileAllowingSmallOuterExpansion() {
+        val image = BufferedImage(48, 24, BufferedImage.TYPE_INT_ARGB)
+        val userMask = MutableList(16 * 8) { 0 }
+        for (y in 0 until 8) {
+            for (x in 0 until 5) userMask[y * 16 + x] = 255
+            for (x in 11 until 16) userMask[y * 16 + x] = 255
+        }
+        val candidateMask = MutableList(20 * 8) { 255 }
+
+        val result = constrainedRefineUserRegion(
+            image = image,
+            region = CropRegion(
+                id = "manual",
+                x = 12,
+                y = 6,
+                width = 16,
+                height = 8,
+                maskWidth = 16,
+                maskHeight = 8,
+                alphaMask = userMask
+            ),
+            candidate = CropRegion(
+                id = "candidate",
+                x = 10,
+                y = 6,
+                width = 20,
+                height = 8,
+                maskWidth = 20,
+                maskHeight = 8,
+                alphaMask = candidateMask
+            ),
+            config = DetectionConfig(manualRefineExpansionRadius = 3, manualRefineConflictTolerance = 0.45),
+            backgroundArgb = 0,
+            mode = DetectionMode.FALLBACK_BACKGROUND
+        )
+
+        assertEquals(10, result?.x)
+        assertEquals(6, result?.y)
+        assertEquals(20, result?.width)
+        assertEquals(8, result?.height)
+        assertEquals(0, result?.maskAlphaAt(18, 10))
+        assertTrue((result?.maskAlphaAt(10, 10) ?: 0) > 0)
+        assertTrue((result?.maskAlphaAt(29, 10) ?: 0) > 0)
+    }
+
 }

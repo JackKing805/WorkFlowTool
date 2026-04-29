@@ -13,8 +13,8 @@ Runtime behavior:
 Main scripts:
 
 - `make_training_set.py`: merges mask-first JSONL annotations into `training_sets/combined/annotations.jsonl`.
-- `train_icon_detector.py`: trains the first-run segmentation model from local annotations and exports ONNX.
-- `detect_icons.py`: runs ONNX Runtime CPU inference and outputs mask-first JSON.
+- `train_icon_detector.py`: trains a local-only segmentation model from annotations, using foreground-weighted losses and validation safeguards, then exports ONNX.
+- `detect_icons.py`: runs ONNX Runtime CPU inference, applies adaptive mask thresholding when needed, and outputs mask-first JSON.
 
 The detector output uses:
 
@@ -25,6 +25,7 @@ The detector output uses:
 - `regions[].alphaMask`
 - `regions[].score`
 - `stats.backend = "mask_rcnn_onnx"`
+- Diagnostic stats including `maxProbability`, `meanProbability`, `effectiveMaskThreshold`, and `thresholdStrategy`
 
 Environment overrides:
 

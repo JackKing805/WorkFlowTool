@@ -6,15 +6,10 @@ import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
-import io.github.workflowtool.model.GridConfig
 import java.awt.image.BufferedImage
 
 interface RegionDetector {
     fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult
-}
-
-interface RegionSplitter {
-    fun split(image: BufferedImage, config: GridConfig): List<CropRegion>
 }
 
 interface RegionExporter {
@@ -36,9 +31,6 @@ interface WindowController {
     fun minimize()
     fun toggleMaximize()
     fun close()
-    fun beginDrag(mouseScreenX: Int, mouseScreenY: Int)
-    fun dragTo(mouseScreenX: Int, mouseScreenY: Int)
-    fun endDrag()
 }
 
 enum class StringKey {
@@ -52,22 +44,12 @@ enum class StringKey {
     ProcessTitle,
     OpenImage,
     AutoMode,
-    GridMode,
     BaseGeneration,
     ManualAdjustments,
     CurrentBaseSource,
     ManualEditsActive,
     Regenerate,
     ResetManualEdits,
-    SmartGridSettings,
-    GridColumns,
-    GridRows,
-    GridCellWidth,
-    GridCellHeight,
-    SearchPadding,
-    SnapToContent,
-    IgnoreEmptyCells,
-    TrimCellToContent,
     DrawRectangle,
     MergeNearby,
     RemoveSmall,

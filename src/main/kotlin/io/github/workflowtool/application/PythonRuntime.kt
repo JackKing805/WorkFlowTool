@@ -4,7 +4,6 @@ import java.nio.file.Path
 import kotlin.io.path.Path
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.exists
-import kotlin.runCatching
 
 internal object PythonRuntime {
     val venvDir: Path by lazy {

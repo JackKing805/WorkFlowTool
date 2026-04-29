@@ -37,9 +37,10 @@ import java.awt.dnd.DnDConstants
 import java.awt.dnd.DropTarget
 import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDropEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.io.File
 
-//TODO 优化预览区，目前预览区导入图片后拖动会有明显卡顿，点击选框也会卡顿，优化性能
 fun main() {
     installClipboardExceptionGuard()
     FileKit.init(appId = "io.github.workflowtool")
@@ -54,6 +55,8 @@ fun main() {
         ) {
             val controller = rememberAppController(layoutSpec)
             val density = LocalDensity.current
+            val titleBarHeightPx = with(density) { 62.dp.roundToPx() }
+            val windowControlsWidthPx = with(density) { (58.dp * 3).roundToPx() }
 
             LaunchedEffect(Unit) {
                 window.minimumSize = with(density) {
@@ -83,16 +86,48 @@ fun main() {
                         }
                     }
                 })
+                val dragHandler = object : MouseAdapter() {
+                    private var startMouse: Point? = null
+                    private var startWindow: Point? = null
+
+                    override fun mousePressed(event: MouseEvent) {
+                        if (windowState.placement != WindowPlacement.Floating || event.button != MouseEvent.BUTTON1) return
+                        if (!event.isTitleDragArea(window.width, titleBarHeightPx, windowControlsWidthPx)) return
+                        startMouse = event.locationOnScreen
+                        startWindow = window.location
+                    }
+
+                    override fun mouseDragged(event: MouseEvent) {
+                        if (windowState.placement != WindowPlacement.Floating) return
+                        val mouse = startMouse ?: return
+                        val origin = startWindow ?: return
+                        val current = event.locationOnScreen
+                        window.setLocation(
+                            origin.x + current.x - mouse.x,
+                            origin.y + current.y - mouse.y
+                        )
+                    }
+
+                    override fun mouseReleased(event: MouseEvent) {
+                        clear()
+                    }
+
+                    private fun clear() {
+                        startMouse = null
+                        startWindow = null
+                    }
+                }
+                window.addMouseListener(dragHandler)
+                window.addMouseMotionListener(dragHandler)
                 onDispose {
                     window.dropTarget = null
+                    window.removeMouseListener(dragHandler)
+                    window.removeMouseMotionListener(dragHandler)
                 }
             }
 
             val windowController = remember(windowState) {
                 object : WindowController {
-                    private var dragStartMouse: Point? = null
-                    private var dragStartWindow: Point? = null
-
                     override fun minimize() {
                         windowState.isMinimized = true
                     }
@@ -108,27 +143,6 @@ fun main() {
 
                     override fun close() {
                         exitApplication()
-                    }
-
-                    override fun beginDrag(mouseScreenX: Int, mouseScreenY: Int) {
-                        if (windowState.placement != WindowPlacement.Floating) return
-                        dragStartMouse = Point(mouseScreenX, mouseScreenY)
-                        dragStartWindow = Point(window.x, window.y)
-                    }
-
-                    override fun dragTo(mouseScreenX: Int, mouseScreenY: Int) {
-                        if (windowState.placement != WindowPlacement.Floating) return
-                        val startMouse = dragStartMouse ?: return
-                        val startWindow = dragStartWindow ?: return
-                        window.location = Point(
-                            startWindow.x + (mouseScreenX - startMouse.x),
-                            startWindow.y + (mouseScreenY - startMouse.y)
-                        )
-                    }
-
-                    override fun endDrag() {
-                        dragStartMouse = null
-                        dragStartWindow = null
                     }
                 }
             }
@@ -162,12 +176,16 @@ private fun installClipboardExceptionGuard() {
     })
 }
 
+private fun MouseEvent.isTitleDragArea(windowWidth: Int, titleBarHeightPx: Int, controlsWidthPx: Int): Boolean {
+    if (y !in 0 until titleBarHeightPx) return false
+    return x in 0 until (windowWidth - controlsWidthPx).coerceAtLeast(0)
+}
+
 @Composable
 private fun rememberAppController(layoutSpec: LayoutSpec): AppController {
     return remember {
         AppController(
             detector = ServiceFactory.detector(),
-            splitter = ServiceFactory.splitter(),
             exporter = ServiceFactory.exporter(),
             layoutSpec = layoutSpec,
             localization = DefaultLocalizationProvider,

@@ -1,19 +1,12 @@
 ﻿package io.github.workflowtool.application
 
 import io.github.workflowtool.model.DetectionConfig
-import io.github.workflowtool.model.GridConfig
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
 
 fun AppController.updateDetectionConfig(next: DetectionConfig) {
     if (detectionConfig == next) return
     detectionConfig = next
-    persistSettings()
-}
-
-fun AppController.updateGridConfig(next: GridConfig) {
-    if (gridConfig == next) return
-    gridConfig = next
     persistSettings()
 }
 

@@ -10,12 +10,11 @@ import java.awt.Color
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.nio.file.Files
+import java.util.ArrayDeque
 import javax.imageio.ImageIO
 import kotlin.io.path.exists
-import kotlin.io.path.nameWithoutExtension
 import kotlin.math.max
 import kotlin.math.roundToInt
-import java.util.ArrayDeque
 
 class IconExporter {
     fun export(
@@ -59,7 +58,11 @@ class IconExporter {
         output: java.nio.file.Path
     ): Boolean {
         output.parent?.let(Files::createDirectories)
-        return writeImage(process(cropPreview(image, region, allRegions), config), output, config.outputFormat)
+        return writeImage(
+            process(cropPreview(image, region, allRegions), config),
+            output,
+            config.outputFormat
+        )
     }
 
     fun cropPreview(image: BufferedImage, region: CropRegion, allRegions: List<CropRegion> = listOf(region)): BufferedImage {
@@ -107,7 +110,11 @@ class IconExporter {
     }
 
     private fun process(input: BufferedImage, config: ExportConfig): BufferedImage {
-        var image = if (config.removeBackgroundToTransparent) removeBackground(input, config.backgroundArgb, config.backgroundTolerance) else copy(input)
+        var image = if (config.removeBackgroundToTransparent) {
+            removeBackground(input, config.backgroundArgb, config.backgroundTolerance)
+        } else {
+            copy(input)
+        }
         if (config.trimTransparentPadding) image = trimTransparent(image)
         if (config.padToSquare) image = padToSquare(image)
         config.fixedSize?.takeIf { it > 0 && !config.keepOriginalSize }?.let { size ->
@@ -139,11 +146,12 @@ class IconExporter {
                 }
                 val distance = colorDistance(argb, backgroundArgb)
                 val index = y * input.width + x
-                if (connectedBackground[index] && distance <= toleranceScore) {
+                if (distance <= toleranceScore) {
                     output.setRGB(x, y, 0)
                     continue
                 }
-                val shouldFeather = distance < toleranceScore + softness && touchesConnectedBackground(connectedBackground, input.width, input.height, x, y)
+                val shouldFeather = distance < toleranceScore + softness &&
+                    touchesConnectedBackground(connectedBackground, input.width, input.height, x, y)
                 val featheredAlpha = if (!shouldFeather) {
                     sourceAlpha
                 } else {

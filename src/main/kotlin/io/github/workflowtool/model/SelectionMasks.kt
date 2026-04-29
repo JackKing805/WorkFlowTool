@@ -37,18 +37,20 @@ fun CropRegion.applyBrushToMask(
     val targetTop = (centerY - brushRadius).coerceIn(0, imageHeight)
     val targetRight = (centerX + brushRadius + 1).coerceIn(targetLeft, imageWidth)
     val targetBottom = (centerY + brushRadius + 1).coerceIn(targetTop, imageHeight)
-    val nextLeft = if (mode == MaskEditMode.Replace || !hasMask()) targetLeft else min(x, targetLeft)
-    val nextTop = if (mode == MaskEditMode.Replace || !hasMask()) targetTop else min(y, targetTop)
-    val nextRight = if (mode == MaskEditMode.Replace || !hasMask()) targetRight else max(right, targetRight)
-    val nextBottom = if (mode == MaskEditMode.Replace || !hasMask()) targetBottom else max(bottom, targetBottom)
+    val existingMask = hasMask()
+    val preserveExistingShape = mode != MaskEditMode.Replace
+    val nextLeft = if (preserveExistingShape) min(x, targetLeft) else targetLeft
+    val nextTop = if (preserveExistingShape) min(y, targetTop) else targetTop
+    val nextRight = if (preserveExistingShape) max(right, targetRight) else targetRight
+    val nextBottom = if (preserveExistingShape) max(bottom, targetBottom) else targetBottom
     val nextWidth = (nextRight - nextLeft).coerceAtLeast(1)
     val nextHeight = (nextBottom - nextTop).coerceAtLeast(1)
     val nextMask = MutableList(nextWidth * nextHeight) { 0 }
 
-    if (mode != MaskEditMode.Replace && hasMask()) {
+    if (preserveExistingShape) {
         for (py in y until bottom) {
             for (px in x until right) {
-                val alpha = maskAlphaAt(px, py)
+                val alpha = if (existingMask) maskAlphaAt(px, py) else 255
                 if (alpha > 0) nextMask[(py - nextTop) * nextWidth + (px - nextLeft)] = alpha
             }
         }

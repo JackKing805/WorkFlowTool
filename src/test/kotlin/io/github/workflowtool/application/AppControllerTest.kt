@@ -1,9 +1,9 @@
 ﻿package io.github.workflowtool.application
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import io.github.workflowtool.domain.RegionDetector
 import io.github.workflowtool.domain.RegionExporter
-import io.github.workflowtool.domain.RegionSplitter
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionMode
@@ -11,11 +11,13 @@ import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
 import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
-import io.github.workflowtool.model.GridConfig
+import io.github.workflowtool.model.hasMask
+import io.github.workflowtool.model.maskAlphaAt
 import java.awt.Color
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import javax.imageio.ImageIO
+import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -26,7 +28,6 @@ class AppControllerTest {
     fun controllerLogsOfflineDependencySelfCheckOnStartup() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -39,10 +40,8 @@ class AppControllerTest {
     @Test
     fun nativeUnavailableDoesNotBlockInjectedDetectors() {
         val detector = CountingDetector()
-        val splitter = CountingSplitter()
         val controller = AppController(
             detector = detector,
-            splitter = splitter,
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -52,17 +51,14 @@ class AppControllerTest {
 
         controller.loadFile(createImageFile())
         controller.rebuildFromAuto(logResult = true)
-        controller.rebuildFromSmartGrid(logResult = true)
 
         assertTrue(detector.calls >= 1)
-        assertEquals(1, splitter.calls)
     }
 
     @Test
     fun selectingContainedRegionSelectsOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -87,10 +83,138 @@ class AppControllerTest {
     }
 
     @Test
+    fun additiveSelectionKeepsExistingSelections() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10, selected = true),
+                CropRegion("b", 20, 0, 10, 10),
+                CropRegion("c", 40, 0, 10, 10)
+            )
+        )
+
+        controller.selectRegion("b", additive = true)
+
+        assertEquals(listOf("a", "b"), controller.regions.filter { it.selected }.map { it.id })
+        assertEquals("已选 2 个", controller.selectedRegionLabel)
+    }
+
+    @Test
+    fun toggleRegionSelectionCanSelectAndDeselectSingleRegion() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10),
+                CropRegion("b", 20, 0, 10, 10, selected = true)
+            )
+        )
+
+        controller.toggleRegionSelection("a")
+        assertEquals(listOf("a", "b"), controller.regions.filter { it.selected }.map { it.id })
+
+        controller.toggleRegionSelection("b")
+        assertEquals(listOf("a"), controller.regions.filter { it.selected }.map { it.id })
+    }
+
+    @Test
+    fun rangeSelectionSelectsAnchorTargetAndItemsBetween() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10),
+                CropRegion("b", 20, 0, 10, 10),
+                CropRegion("c", 40, 0, 10, 10),
+                CropRegion("d", 60, 0, 10, 10)
+            )
+        )
+
+        controller.selectRegionRange("b", "d")
+
+        assertEquals(listOf("b", "c", "d"), controller.regions.filter { it.selected }.map { it.id })
+    }
+
+    @Test
+    fun boundsSelectionCanReplaceOrAddToSelection() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 0, 0, 10, 10, selected = true),
+                CropRegion("b", 20, 0, 10, 10),
+                CropRegion("c", 60, 0, 10, 10)
+            )
+        )
+
+        controller.selectRegionsInBounds(18, -2, 35, 12, additive = false)
+        assertEquals(listOf("b"), controller.regions.filter { it.selected }.map { it.id })
+
+        controller.selectRegionsInBounds(-2, -2, 12, 12, additive = true)
+        assertEquals(listOf("a", "b"), controller.regions.filter { it.selected }.map { it.id })
+    }
+
+    @Test
+    fun mergeSelectedRegionsReplacesMultipleRegionsWithSingleMaskRegion() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        controller.loadFile(createImageFile(width = 80, height = 80))
+        controller.replaceRegions(
+            "group",
+            listOf(
+                CropRegion("a", 5, 6, 10, 8, selected = true),
+                CropRegion("b", 25, 20, 12, 10, selected = true),
+                CropRegion("c", 60, 60, 5, 5)
+            )
+        )
+
+        controller.mergeSelectedRegions()
+
+        assertEquals(2, controller.regions.size)
+        val merged = controller.regions.first()
+        assertEquals(true, merged.selected)
+        assertEquals(5, merged.x)
+        assertEquals(6, merged.y)
+        assertEquals(32, merged.width)
+        assertEquals(24, merged.height)
+        assertTrue(merged.hasMask())
+        assertEquals(listOf("a"), controller.regions.filter { it.selected }.map { it.id })
+    }
+
+    @Test
     fun togglingVisibilityOnContainedRegionTogglesOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -117,7 +241,6 @@ class AppControllerTest {
     fun removingContainedRegionRemovesOnlyThatRegion() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -142,7 +265,6 @@ class AppControllerTest {
     fun fitSelectionCentersSelectedRegion() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -169,7 +291,6 @@ class AppControllerTest {
     fun viewportCanPanBeyondImageBounds() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -185,10 +306,36 @@ class AppControllerTest {
     }
 
     @Test
+    fun zoomAroundImagePointUsesRenderedImageScaleForAnchor() {
+        val controller = AppController(
+            detector = StaticDetector(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createImageFile(width = 257, height = 193))
+        controller.updateViewportSize(Size(400f, 300f))
+        controller.zoom = 1f
+        controller.viewportOffset = Offset(0.4f, -0.4f)
+
+        val anchor = Offset(180f, 120f)
+        val imagePoint = Offset(88.5f, 41.25f)
+        controller.zoomAroundImagePoint(1.337f, anchor, imagePoint)
+        val renderedWidth = (257 * controller.zoom).roundToInt()
+        val renderedHeight = (193 * controller.zoom).roundToInt()
+        val renderZoomX = renderedWidth.toFloat() / 257f
+        val renderZoomY = renderedHeight.toFloat() / 193f
+
+        assertEquals(anchor.x - imagePoint.x * renderZoomX, controller.viewportOffset.x)
+        assertEquals(anchor.y - imagePoint.y * renderZoomY, controller.viewportOffset.y)
+    }
+
+    @Test
     fun redoRestoresUndoAvailability() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -204,7 +351,7 @@ class AppControllerTest {
     }
 
     @Test
-    fun reopeningHistorySnapshotRestoresSavedBaseAndRegions() {
+    fun missingHistorySourceDoesNotRestoreSnapshot() {
         WorkspaceHistoryStore.clear()
         val file = createImageFile(width = 48, height = 36)
         val originalBase = CropRegion("auto", 3, 4, 11, 9)
@@ -212,7 +359,6 @@ class AppControllerTest {
 
         val savingController = AppController(
             detector = StaticDetector(listOf(originalBase)),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -225,11 +371,50 @@ class AppControllerTest {
 
         val snapshotId = savingController.workspaceHistoryEntries.single().id
         assertTrue(savingController.workspaceHistoryEntries.single().previewPath.toFile().isFile)
+        Files.deleteIfExists(file.toPath())
 
         val restoringDetector = CountingDetector()
         val restoringController = AppController(
             detector = restoringDetector,
-            splitter = CountingSplitter(),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        restoringController.reopenHistorySnapshot(snapshotId)
+
+        assertEquals(0, restoringDetector.calls)
+        assertEquals(null, restoringController.imageFile)
+        assertTrue(restoringController.logs.any { it.contains("缺少 1 个源文件") })
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun reopeningHistorySnapshotRestoresSavedBaseAndRegions() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val originalBase = CropRegion("auto", 3, 4, 11, 9)
+        val manual = CropRegion("manual", 18, 12, 14, 10, visible = false)
+
+        val savingController = AppController(
+            detector = StaticDetector(listOf(originalBase)),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        savingController.loadFile(file)
+        savingController.replaceRegions("manual", listOf(manual))
+
+        val snapshotId = savingController.workspaceHistoryEntries.single().id
+
+        val restoringDetector = CountingDetector()
+        val restoringController = AppController(
+            detector = restoringDetector,
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -257,10 +442,86 @@ class AppControllerTest {
     }
 
     @Test
+    fun loadingImageStoresHistoryEvenWhenDetectionFindsNoRegions() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy(),
+            persistenceEnabled = true
+        )
+
+        controller.loadFile(file)
+
+        assertEquals(1, controller.workspaceHistoryEntries.size)
+        assertEquals(file.absolutePath, controller.workspaceHistoryEntries.single().sourcePaths.single().toFile().absolutePath)
+        assertTrue(controller.workspaceHistoryEntries.single().previewPath.toFile().isFile)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun workspaceHistoryPersistsWhenRegionScoreIsNotFinite() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val entry = WorkspaceSnapshotEntry(
+            id = "non-finite-score",
+            title = "score test",
+            sourcePaths = listOf(file.toPath()),
+            currentImageIndex = 0,
+            updatedAtEpochMillis = 1L,
+            imageWidth = 48,
+            imageHeight = 36,
+            hasManualEdits = true,
+            baseRegions = emptyList(),
+            regions = listOf(CropRegion("nan", 1, 2, 3, 4, score = Float.NaN))
+        )
+
+        WorkspaceHistoryStore.upsert(
+            existing = emptyList(),
+            entry = entry,
+            preview = BufferedImage(12, 8, BufferedImage.TYPE_INT_ARGB)
+        )
+
+        val loaded = WorkspaceHistoryStore.load()
+        assertEquals(1, loaded.size)
+        assertEquals(null, loaded.single().regions.single().score)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
+    fun workspaceHistoryLoadsLegacyFileWithNanScore() {
+        WorkspaceHistoryStore.clear()
+        val file = createImageFile(width = 48, height = 36)
+        val path = file.toPath().toString().replace("\\", "\\\\")
+        val historyFile = AppRuntimeFiles.runtimeRoot.resolve("workspace-history.json")
+        Files.createDirectories(historyFile.parent)
+        Files.writeString(
+            historyFile,
+            """
+            {
+              "entries": [
+                {"id":"legacy-nan","title":"legacy","sourcePaths":["$path"],"currentImageIndex":0,"updatedAtEpochMillis":1,"imageWidth":48,"imageHeight":36,"hasManualEdits":false,"baseRegions":[],"regions":[{"id":"1","x":1,"y":2,"width":3,"height":4,"visible":true,"selected":false,"maskWidth":0,"maskHeight":0,"alphaMask":[],"score":NaN}]}
+              ]
+            }
+            """.trimIndent(),
+            Charsets.UTF_8
+        )
+
+        val loaded = WorkspaceHistoryStore.load()
+
+        assertEquals(1, loaded.size)
+        assertEquals("legacy-nan", loaded.single().id)
+        assertEquals(null, loaded.single().regions.single().score)
+        WorkspaceHistoryStore.clear()
+    }
+
+    @Test
     fun exportPreviewRegionWritesSingleRegionImage() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -288,7 +549,6 @@ class AppControllerTest {
         val detector = CountingDetector()
         val controller = AppController(
             detector = detector,
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -313,7 +573,6 @@ class AppControllerTest {
     fun samplingBackgroundDoesNotResetEditedRegions() {
         val controller = AppController(
             detector = StaticDetector(listOf(CropRegion("auto", 1, 1, 8, 8))),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -334,10 +593,8 @@ class AppControllerTest {
     @Test
     fun configChangesDoNotResetEditedRegions() {
         val detector = CountingDetector()
-        val splitter = CountingSplitter()
         val controller = AppController(
             detector = detector,
-            splitter = splitter,
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -347,13 +604,10 @@ class AppControllerTest {
         controller.loadFile(createImageFile())
         controller.replaceRegions("manual", listOf(CropRegion("1", 12, 12, 18, 18)))
         val detectorCalls = detector.calls
-        val splitterCalls = splitter.calls
 
         controller.updateDetectionConfig(controller.detectionConfig.copy(minWidth = controller.detectionConfig.minWidth + 1))
-        controller.updateGridConfig(controller.gridConfig.copy(columns = controller.gridConfig.columns + 1))
 
         assertEquals(detectorCalls, detector.calls)
-        assertEquals(splitterCalls, splitter.calls)
         assertEquals(1, controller.regions.size)
         assertEquals(12, controller.regions.single().x)
         assertEquals(18, controller.regions.single().width)
@@ -364,7 +618,6 @@ class AppControllerTest {
     fun loadingMultipleImagesCreatesSingleSpacedCanvas() {
         val controller = AppController(
             detector = StaticDetector(),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -397,7 +650,6 @@ class AppControllerTest {
                     )
                 )
             ),
-            splitter = CountingSplitter(),
             exporter = NoopExporter(),
             layoutSpec = LayoutSpec(),
             localization = DefaultLocalizationProvider,
@@ -413,6 +665,200 @@ class AppControllerTest {
         assertEquals(24, region.height)
     }
 
+    @Test
+    fun detectInsideRegionPromotesDraftBoxWhenDetectionFails() {
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        val existing = CropRegion("existing", 2, 3, 8, 9, selected = true)
+
+        controller.loadFile(createImageFile(width = 64, height = 48))
+        controller.replaceRegions("existing", listOf(existing))
+        controller.detectInsideRegion(CropRegion("draft", 10, 10, 20, 20, selected = true))
+
+        assertEquals(2, controller.regions.size)
+        assertEquals(false, controller.regions[0].selected)
+        val promoted = controller.regions[1]
+        assertEquals(10, promoted.x)
+        assertEquals(10, promoted.y)
+        assertEquals(6, promoted.width)
+        assertEquals(6, promoted.height)
+        assertTrue(promoted.selected)
+        assertTrue(promoted.hasMask())
+        assertTrue(controller.logs.any { it.contains("已将框选范围自动贴合图标边缘") })
+    }
+
+    @Test
+    fun detectInsideRegionReplacesDraftBoxWithDetectedRegionsOnSuccess() {
+        val controller = AppController(
+            detector = StaticDetector(listOf(CropRegion("detected", 3, 4, 6, 7))),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createImageFile(width = 64, height = 48))
+        controller.clearRegions()
+        controller.detectInsideRegion(CropRegion("draft", 10, 12, 20, 20, selected = true))
+
+        val region = controller.regions.single()
+        assertEquals(13, region.x)
+        assertEquals(16, region.y)
+        assertEquals(6, region.width)
+        assertEquals(7, region.height)
+        assertTrue(region.selected)
+    }
+
+    @Test
+    fun addBrushCommitSnapsSelectedRegionToForeground() {
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createImageFile(width = 64, height = 48))
+        controller.replaceRegions(
+            "贴合新增区域",
+            listOf(CropRegion("brush", 8, 8, 20, 20, selected = true))
+        )
+
+        val region = controller.regions.single()
+        assertEquals(8, region.x)
+        assertEquals(8, region.y)
+        assertEquals(8, region.width)
+        assertEquals(8, region.height)
+        assertTrue(region.hasMask())
+        assertTrue(controller.logs.any { it.contains("新增区域已自动贴合图标边缘") })
+    }
+
+    @Test
+    fun addBrushCommitSnapsSelectedRegionAsOneWholeIcon() {
+        val controller = AppController(
+            detector = StaticDetector(emptyList()),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        val maskWidth = 36
+        val maskHeight = 12
+        val mask = MutableList(maskWidth * maskHeight) { 0 }
+        for (y in 0 until maskHeight) {
+            for (x in 0 until 12) mask[y * maskWidth + x] = 255
+            for (x in 24 until 36) mask[y * maskWidth + x] = 255
+        }
+
+        controller.loadFile(createTwoPartIconFile())
+        controller.replaceRegions(
+            "整体贴合选区",
+            listOf(
+                CropRegion(
+                    id = "whole",
+                    x = 4,
+                    y = 4,
+                    width = maskWidth,
+                    height = maskHeight,
+                    selected = true,
+                    maskWidth = maskWidth,
+                    maskHeight = maskHeight,
+                    alphaMask = mask
+                )
+            )
+        )
+
+        val region = controller.regions.single()
+        assertEquals("whole", region.id)
+        assertEquals(4, region.x)
+        assertEquals(4, region.y)
+        assertEquals(36, region.width)
+        assertEquals(12, region.height)
+        assertTrue(region.selected)
+        assertTrue(region.hasMask())
+        assertEquals(0, region.maskAlphaAt(22, 8))
+        assertTrue(region.maskAlphaAt(8, 8) > 0)
+        assertTrue(region.maskAlphaAt(34, 8) > 0)
+        assertTrue(controller.logs.any { it.contains("选区已按用户精修结果补全并贴合") })
+    }
+
+    @Test
+    fun addBrushCommitUsesRedetectionResultWhenAvailable() {
+        val controller = AppController(
+            detector = StaticDetector(listOf(CropRegion("detected", 3, 4, 20, 10))),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+
+        controller.loadFile(createTwoPartIconFile())
+        controller.replaceRegions(
+            "整体贴合选区",
+            listOf(CropRegion("whole", 4, 4, 36, 12, selected = true))
+        )
+
+        val region = controller.regions.single()
+        assertEquals("whole", region.id)
+        assertEquals(7, region.x)
+        assertEquals(8, region.y)
+        assertEquals(20, region.width)
+        assertEquals(10, region.height)
+        assertTrue(region.selected)
+        assertTrue(region.hasMask())
+    }
+
+    @Test
+    fun addBrushCommitKeepsMaskedCutoutWhenRedetectionTriesToFillItBack() {
+        val controller = AppController(
+            detector = StaticDetector(listOf(CropRegion("detected", 0, 0, 36, 12))),
+            exporter = NoopExporter(),
+            layoutSpec = LayoutSpec(),
+            localization = DefaultLocalizationProvider,
+            layoutPolicy = DefaultLayoutConstraintPolicy()
+        )
+        val maskWidth = 36
+        val maskHeight = 12
+        val mask = MutableList(maskWidth * maskHeight) { 0 }
+        for (y in 0 until maskHeight) {
+            for (x in 0 until 12) mask[y * maskWidth + x] = 255
+            for (x in 24 until 36) mask[y * maskWidth + x] = 255
+        }
+
+        controller.loadFile(createTwoPartIconFile())
+        controller.replaceRegions(
+            "整体贴合选区",
+            listOf(
+                CropRegion(
+                    id = "whole",
+                    x = 4,
+                    y = 4,
+                    width = maskWidth,
+                    height = maskHeight,
+                    selected = true,
+                    maskWidth = maskWidth,
+                    maskHeight = maskHeight,
+                    alphaMask = mask
+                )
+            )
+        )
+
+        val region = controller.regions.single()
+        assertEquals(4, region.x)
+        assertEquals(4, region.y)
+        assertEquals(36, region.width)
+        assertEquals(12, region.height)
+        assertEquals(0, region.maskAlphaAt(22, 8))
+        assertTrue(region.maskAlphaAt(8, 8) > 0)
+        assertTrue(region.maskAlphaAt(34, 8) > 0)
+    }
+
     private fun createImageFile(width: Int = 64, height: Int = 32): java.io.File {
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
         val graphics = image.createGraphics()
@@ -420,6 +866,18 @@ class AppControllerTest {
         graphics.fillRect(4, 4, 12, 12)
         graphics.dispose()
         val file = Files.createTempFile("workflowtool-controller", ".png").toFile()
+        ImageIO.write(image, "png", file)
+        return file
+    }
+
+    private fun createTwoPartIconFile(): java.io.File {
+        val image = BufferedImage(64, 32, BufferedImage.TYPE_INT_ARGB)
+        val graphics = image.createGraphics()
+        graphics.color = Color.WHITE
+        graphics.fillRect(4, 4, 12, 12)
+        graphics.fillRect(28, 4, 12, 12)
+        graphics.dispose()
+        val file = Files.createTempFile("workflowtool-two-part-icon", ".png").toFile()
         ImageIO.write(image, "png", file)
         return file
     }
@@ -456,15 +914,6 @@ private class StaticDetector(
 ) : RegionDetector {
     override fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult {
         return DetectionResult(regions, DetectionMode.FALLBACK_BACKGROUND, DetectionStats(0, 0, regions.size, regions.size, 0, 0))
-    }
-}
-
-private class CountingSplitter : RegionSplitter {
-    var calls: Int = 0
-
-    override fun split(image: BufferedImage, config: GridConfig): List<CropRegion> {
-        calls += 1
-        return emptyList()
     }
 }
 

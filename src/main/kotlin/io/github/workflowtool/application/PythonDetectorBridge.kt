@@ -34,7 +34,7 @@ internal object PythonDetectorBridge {
                     "--score-threshold",
                     scoreThreshold(config).toString(),
                     "--mask-threshold",
-                    "0.5"
+                    "0.28"
                 )
             )?.toMutableList() ?: return null
             val process = PythonRuntime.configureProcess(
@@ -106,7 +106,7 @@ internal object PythonDetectorBridge {
     }
 
     private fun scoreThreshold(config: DetectionConfig): Float {
-        return (config.colorDistanceThreshold / 100.0f).coerceIn(0.05f, 0.95f)
+        return (config.colorDistanceThreshold / 160.0f).coerceIn(0.08f, 0.55f)
     }
 
     private fun parseAlphaMask(region: JsonValue.JsonObject): List<Int> {

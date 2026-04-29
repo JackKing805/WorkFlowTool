@@ -6,6 +6,7 @@ import io.github.workflowtool.model.DetectionMode
 import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.fromMaskBounds
 import io.github.workflowtool.model.hasMask
+import io.github.workflowtool.model.maskAlphaAt
 import io.github.workflowtool.model.withAlphaMask
 import java.awt.image.BufferedImage
 import kotlin.math.abs
@@ -43,6 +44,158 @@ internal fun postProcessDetection(
     )
 }
 
+internal fun snapRegionToForeground(
+    image: BufferedImage,
+    region: CropRegion,
+    config: DetectionConfig,
+    backgroundArgb: Int,
+    mode: DetectionMode
+): CropRegion? {
+    val clamped = CropRegion(
+        id = region.id,
+        x = region.x.coerceIn(0, image.width),
+        y = region.y.coerceIn(0, image.height),
+        width = region.right.coerceIn(0, image.width) - region.x.coerceIn(0, image.width),
+        height = region.bottom.coerceIn(0, image.height) - region.y.coerceIn(0, image.height),
+        visible = region.visible,
+        selected = region.selected,
+        score = region.score
+    )
+    if (clamped.width <= 0 || clamped.height <= 0) return null
+    val mask = MutableList(clamped.width * clamped.height) { 0 }
+    for (localY in 0 until clamped.height) {
+        val y = clamped.y + localY
+        for (localX in 0 until clamped.width) {
+            val x = clamped.x + localX
+            if (isForegroundPixel(image.getRGB(x, y), config, backgroundArgb, mode)) {
+                mask[localY * clamped.width + localX] = 255
+            }
+        }
+    }
+    val smoothed = smoothAlphaMask(mask, clamped.width, clamped.height)
+    return fromMaskBounds(
+        x = clamped.x,
+        y = clamped.y,
+        width = clamped.width,
+        height = clamped.height,
+        mask = smoothed,
+        imageWidth = image.width,
+        imageHeight = image.height,
+        id = region.id
+    )?.copy(visible = region.visible, selected = region.selected, score = region.score)
+}
+
+internal fun snapRegionToForegroundWhole(
+    image: BufferedImage,
+    region: CropRegion,
+    config: DetectionConfig,
+    backgroundArgb: Int,
+    mode: DetectionMode
+): CropRegion? {
+    val left = region.x.coerceIn(0, image.width)
+    val top = region.y.coerceIn(0, image.height)
+    val right = region.right.coerceIn(left, image.width)
+    val bottom = region.bottom.coerceIn(top, image.height)
+    val width = right - left
+    val height = bottom - top
+    if (width <= 0 || height <= 0) return null
+
+    val mask = MutableList(width * height) { 0 }
+    for (localY in 0 until height) {
+        val y = top + localY
+        for (localX in 0 until width) {
+            val x = left + localX
+            val confirmedAlpha = if (region.hasMask()) region.maskAlphaAt(x, y) else 255
+            val foregroundAlpha = if (isForegroundPixel(image.getRGB(x, y), config, backgroundArgb, mode)) 255 else 0
+            mask[localY * width + localX] = max(confirmedAlpha, foregroundAlpha)
+        }
+    }
+
+    return fromMaskBounds(
+        x = left,
+        y = top,
+        width = width,
+        height = height,
+        mask = smoothAlphaMask(mask, width, height),
+        imageWidth = image.width,
+        imageHeight = image.height,
+        id = region.id
+    )?.copy(visible = region.visible, selected = region.selected, score = region.score)
+}
+
+internal fun mergeRegionsToOuterMask(
+    imageWidth: Int,
+    imageHeight: Int,
+    regions: List<CropRegion>,
+    id: String = regions.firstOrNull()?.id.orEmpty()
+): CropRegion? {
+    val visible = regions.filter { it.visible }
+    if (visible.isEmpty()) return null
+    val left = visible.minOf { it.x }.coerceIn(0, imageWidth)
+    val top = visible.minOf { it.y }.coerceIn(0, imageHeight)
+    val right = visible.maxOf { it.right }.coerceIn(left, imageWidth)
+    val bottom = visible.maxOf { it.bottom }.coerceIn(top, imageHeight)
+    val width = right - left
+    val height = bottom - top
+    if (width <= 0 || height <= 0) return null
+    val mask = MutableList(width * height) { 0 }
+    visible.forEach { region ->
+        val regionLeft = region.x.coerceIn(left, right)
+        val regionTop = region.y.coerceIn(top, bottom)
+        val regionRight = region.right.coerceIn(left, right)
+        val regionBottom = region.bottom.coerceIn(top, bottom)
+        for (y in regionTop until regionBottom) {
+            for (x in regionLeft until regionRight) {
+                val alpha = if (region.hasMask()) region.maskAlphaAt(x, y) else 255
+                if (alpha > 0) {
+                    val index = (y - top) * width + (x - left)
+                    mask[index] = max(mask[index], alpha)
+                }
+            }
+        }
+    }
+    return fromMaskBounds(left, top, width, height, smoothAlphaMask(mask, width, height), imageWidth, imageHeight, id)
+        ?.copy(selected = true)
+}
+
+internal fun constrainedRefineUserRegion(
+    image: BufferedImage,
+    region: CropRegion,
+    candidate: CropRegion?,
+    config: DetectionConfig,
+    backgroundArgb: Int,
+    mode: DetectionMode
+): CropRegion? {
+    val fallbackCandidate = snapRegionToForegroundWhole(image, region, config, backgroundArgb, mode)
+    val preferredCandidate = candidate?.let {
+        normalizeManualRefineCandidate(it, image, config, backgroundArgb, mode)
+    } ?: fallbackCandidate
+    if (!hasLockedNegativeMask(region)) {
+        return (preferredCandidate ?: fallbackCandidate)?.copy(
+            id = region.id,
+            visible = region.visible,
+            selected = region.selected,
+            score = region.score
+        )
+    }
+
+    val overlapThreshold = (1.0 - config.manualRefineConflictTolerance).coerceIn(0.05, 0.95)
+    val resolvedCandidate = when {
+        preferredCandidate == null -> fallbackCandidate
+        overlapRatio(region, preferredCandidate) >= overlapThreshold -> preferredCandidate
+        else -> fallbackCandidate?.let {
+            normalizeManualRefineCandidate(it, image, config, backgroundArgb, mode)
+        }
+    }
+
+    return blendUserLockedMask(
+        image = image,
+        user = region,
+        candidate = resolvedCandidate,
+        expansionRadius = config.manualRefineExpansionRadius.coerceAtLeast(0)
+    )
+}
+
 private fun refineMaskBackedRegion(
     region: CropRegion,
     image: BufferedImage,
@@ -66,7 +219,18 @@ private fun refineMaskBackedRegion(
     if (area <= 0) return null
     val density = pixelCount.toFloat() / area.toFloat()
     if (density < max(0.02f, config.minPixelArea / 6000f)) return null
-    return normalized.copy(
+    val smoothed = smoothAlphaMask(normalized.alphaMask, normalized.maskWidth, normalized.maskHeight)
+    val refined = fromMaskBounds(
+        x = normalized.x,
+        y = normalized.y,
+        width = normalized.maskWidth,
+        height = normalized.maskHeight,
+        mask = smoothed,
+        imageWidth = image.width,
+        imageHeight = image.height,
+        id = normalized.id
+    ) ?: normalized
+    return refined.copy(
         visible = region.visible,
         selected = region.selected,
         score = region.score
@@ -110,7 +274,209 @@ private fun attachSelectionMask(
             alphaMask[index] = if (edge) 220 else 255
         }
     }
-    return region.copy(x = left, y = top, width = width, height = height).withAlphaMask(alphaMask, width, height)
+    return region.copy(x = left, y = top, width = width, height = height).withAlphaMask(
+        smoothAlphaMask(alphaMask, width, height),
+        width,
+        height
+    )
+}
+
+private fun normalizeManualRefineCandidate(
+    candidate: CropRegion,
+    image: BufferedImage,
+    config: DetectionConfig,
+    backgroundArgb: Int,
+    mode: DetectionMode
+): CropRegion? {
+    return when {
+        candidate.hasMask() -> refineMaskBackedRegion(candidate, image, config) ?: candidate
+        else -> snapRegionToForeground(image, candidate, config, backgroundArgb, mode) ?: candidate
+    }
+}
+
+private fun hasLockedNegativeMask(region: CropRegion): Boolean =
+    region.hasMask() && region.alphaMask.any { it <= 0 }
+
+private fun overlapRatio(user: CropRegion, candidate: CropRegion): Double {
+    val left = min(user.x, candidate.x)
+    val top = min(user.y, candidate.y)
+    val right = max(user.right, candidate.right)
+    val bottom = max(user.bottom, candidate.bottom)
+    val width = right - left
+    val height = bottom - top
+    if (width <= 0 || height <= 0) return 0.0
+    val userMask = buildBinaryMask(user, left, top, width, height)
+    val candidateMask = buildBinaryMask(candidate, left, top, width, height)
+    var userPixels = 0
+    var overlapPixels = 0
+    for (index in userMask.indices) {
+        if (!userMask[index]) continue
+        userPixels += 1
+        if (candidateMask[index]) overlapPixels += 1
+    }
+    if (userPixels == 0) return 0.0
+    return overlapPixels.toDouble() / userPixels.toDouble()
+}
+
+private fun blendUserLockedMask(
+    image: BufferedImage,
+    user: CropRegion,
+    candidate: CropRegion?,
+    expansionRadius: Int
+): CropRegion? {
+    val rightEdge = max(user.right, candidate?.right ?: user.right)
+    val bottomEdge = max(user.bottom, candidate?.bottom ?: user.bottom)
+    val left = min(user.x, candidate?.x ?: user.x).coerceIn(0, image.width)
+    val top = min(user.y, candidate?.y ?: user.y).coerceIn(0, image.height)
+    val right = rightEdge.coerceIn(left, image.width)
+    val bottom = bottomEdge.coerceIn(top, image.height)
+    val width = right - left
+    val height = bottom - top
+    if (width <= 0 || height <= 0) return null
+
+    val userMask = buildBinaryMask(user, left, top, width, height)
+    val candidateMask = candidate?.let { buildBinaryMask(it, left, top, width, height) } ?: BooleanArray(width * height)
+    val negativeMask = buildNegativeMask(user, left, top, width, height)
+    val expansionMask = dilateMask(userMask, width, height, expansionRadius)
+    val finalMask = BooleanArray(width * height)
+    for (index in finalMask.indices) {
+        finalMask[index] = userMask[index] || (candidateMask[index] && expansionMask[index] && !negativeMask[index])
+    }
+
+    return fromMaskBounds(
+        x = left,
+        y = top,
+        width = width,
+        height = height,
+        mask = binaryMaskToAlpha(finalMask, width, height),
+        imageWidth = image.width,
+        imageHeight = image.height,
+        id = user.id
+    )?.copy(
+        visible = user.visible,
+        selected = user.selected,
+        score = user.score
+    )
+}
+
+private fun buildBinaryMask(region: CropRegion, originX: Int, originY: Int, width: Int, height: Int): BooleanArray {
+    val mask = BooleanArray(width * height)
+    val left = max(region.x, originX)
+    val top = max(region.y, originY)
+    val right = min(region.right, originX + width)
+    val bottom = min(region.bottom, originY + height)
+    for (y in top until bottom) {
+        for (x in left until right) {
+            val filled = if (region.hasMask()) region.maskAlphaAt(x, y) > 0 else true
+            if (filled) {
+                mask[(y - originY) * width + (x - originX)] = true
+            }
+        }
+    }
+    return mask
+}
+
+private fun buildNegativeMask(region: CropRegion, originX: Int, originY: Int, width: Int, height: Int): BooleanArray {
+    val mask = BooleanArray(width * height)
+    if (!region.hasMask()) return mask
+    val left = max(region.x, originX)
+    val top = max(region.y, originY)
+    val right = min(region.right, originX + width)
+    val bottom = min(region.bottom, originY + height)
+    for (y in top until bottom) {
+        for (x in left until right) {
+            if (region.maskAlphaAt(x, y) <= 0) {
+                mask[(y - originY) * width + (x - originX)] = true
+            }
+        }
+    }
+    return mask
+}
+
+private fun dilateMask(mask: BooleanArray, width: Int, height: Int, radius: Int): BooleanArray {
+    if (radius <= 0) return mask.copyOf()
+    val output = BooleanArray(mask.size)
+    val radiusSquared = radius * radius
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            var filled = false
+            for (dy in -radius..radius) {
+                for (dx in -radius..radius) {
+                    if (dx * dx + dy * dy > radiusSquared) continue
+                    val nx = x + dx
+                    val ny = y + dy
+                    if (nx !in 0 until width || ny !in 0 until height) continue
+                    if (mask[ny * width + nx]) {
+                        filled = true
+                        break
+                    }
+                }
+                if (filled) break
+            }
+            output[y * width + x] = filled
+        }
+    }
+    return output
+}
+
+private fun binaryMaskToAlpha(mask: BooleanArray, width: Int, height: Int): List<Int> {
+    val output = MutableList(width * height) { 0 }
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            val index = y * width + x
+            if (!mask[index]) continue
+            val edge = (-1..1).any { dy ->
+                (-1..1).any { dx ->
+                    val nx = x + dx
+                    val ny = y + dy
+                    nx !in 0 until width || ny !in 0 until height || !mask[ny * width + nx]
+                }
+            }
+            output[index] = if (edge) 220 else 255
+        }
+    }
+    return output
+}
+
+private fun smoothAlphaMask(mask: List<Int>, width: Int, height: Int): List<Int> {
+    if (width < 6 || height < 6 || mask.size != width * height) return mask
+    var binary = BooleanArray(width * height) { index -> mask[index] > 0 }
+    binary = majorityFilter(binary, width, height, fillThreshold = 5)
+    binary = majorityFilter(binary, width, height, fillThreshold = 4)
+    val output = MutableList(width * height) { 0 }
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            val index = y * width + x
+            if (!binary[index]) continue
+            val edge = (-1..1).any { dy ->
+                (-1..1).any { dx ->
+                    val nx = x + dx
+                    val ny = y + dy
+                    nx !in 0 until width || ny !in 0 until height || !binary[ny * width + nx]
+                }
+            }
+            output[index] = if (edge) 220 else 255
+        }
+    }
+    return output
+}
+
+private fun majorityFilter(mask: BooleanArray, width: Int, height: Int, fillThreshold: Int): BooleanArray {
+    val output = BooleanArray(mask.size)
+    for (y in 0 until height) {
+        for (x in 0 until width) {
+            var count = 0
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    val nx = x + dx
+                    val ny = y + dy
+                    if (nx in 0 until width && ny in 0 until height && mask[ny * width + nx]) count += 1
+                }
+            }
+            output[y * width + x] = count >= fillThreshold
+        }
+    }
+    return output
 }
 
 private fun refineDetectedRegion(

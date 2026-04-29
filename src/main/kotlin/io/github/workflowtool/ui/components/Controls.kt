@@ -1,10 +1,10 @@
 ﻿package io.github.workflowtool.ui.components
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -22,14 +22,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.Checkbox
+import androidx.compose.material.DropdownMenu
+import androidx.compose.material.DropdownMenuItem
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
@@ -39,7 +45,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.Image
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
 import io.github.workflowtool.ui.editor.drawCheckerboard
@@ -132,15 +137,18 @@ fun SwitchPill(checked: Boolean, onChecked: (Boolean) -> Unit) {
 fun CompactNumber(title: String, value: Int, suffix: String, onValue: (Int) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        SquareButton("-", onClick = { onValue((value - 1).coerceAtLeast(0)) })
+        Spacer(Modifier.width(8.dp))
         Box(
-            Modifier.width(72.dp).height(30.dp).clip(ControlShape)
+            Modifier.width(56.dp).height(30.dp).clip(ControlShape)
                 .background(Color(0xFF171C23))
-                .border(1.dp, Border, ControlShape)
-                .clickable { onValue((value + 1).coerceAtMost(999)) },
+                .border(1.dp, Border, ControlShape),
             contentAlignment = Alignment.Center
         ) {
             Text(value.toString(), color = Color.White, fontSize = 13.sp)
         }
+        Spacer(Modifier.width(8.dp))
+        SquareButton("+", onClick = { onValue((value + 1).coerceAtMost(999)) })
         if (suffix.isNotBlank()) {
             Text(suffix, color = TextMuted, fontSize = 12.sp, modifier = Modifier.padding(start = 7.dp))
         }
@@ -209,8 +217,66 @@ fun SelectField(title: String, value: String, onClick: () -> Unit) {
 }
 
 @Composable
+fun <T> DropdownSelectField(
+    title: String,
+    value: T,
+    options: List<T>,
+    optionLabel: (T) -> String,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Text(title, color = Color.White, fontSize = 13.sp)
+    Spacer(Modifier.height(6.dp))
+    Box(modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().height(34.dp)
+                .clip(ControlShape)
+                .background(Color(0xFF171C23))
+                .border(1.dp, if (expanded) Accent else Border, ControlShape)
+                .alpha(if (enabled) 1f else 0.45f)
+                .clickable(enabled = enabled) { expanded = true }
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                optionLabel(value),
+                color = Color.White,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text(if (expanded) "⌃" else "⌄", color = TextMuted, fontSize = 14.sp)
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(ControlBg).border(1.dp, Border)
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(onClick = {
+                    onSelect(option)
+                    expanded = false
+                }) {
+                    Text(
+                        optionLabel(option),
+                        color = if (option == value) Accent else Color.White,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+}
+
+@Composable
 fun SmallCheck(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(Modifier.height(28.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(30.dp), verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked, onCheckedChange = onChecked)
         Text(label, color = TextMuted, fontSize = 13.sp)
     }

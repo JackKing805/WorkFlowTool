@@ -3,6 +3,7 @@
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import io.github.workflowtool.model.CropRegion
+import kotlin.math.roundToInt
 
 fun AppController.adjustZoom(delta: Float) {
     if (delta == 0f) return
@@ -21,16 +22,27 @@ fun AppController.updateZoom(value: Float) {
     }
 }
 
-fun AppController.zoomAround(factor: Float, anchor: Offset) {
+fun AppController.zoomAroundImagePoint(factor: Float, anchor: Offset, imagePoint: Offset) {
     if (factor == 0f) return
     val currentZoom = zoom
     val nextZoom = (currentZoom * factor).coerceIn(0.1f, 8f)
     if (nextZoom == currentZoom) return
-    val imagePoint = (anchor - viewportOffset) / currentZoom
+    val loaded = image
+    val renderZoomX = loaded?.let {
+        (it.width * nextZoom).toIntRoundedAtLeastOne().toFloat() / it.width.coerceAtLeast(1)
+    } ?: nextZoom
+    val renderZoomY = loaded?.let {
+        (it.height * nextZoom).toIntRoundedAtLeastOne().toFloat() / it.height.coerceAtLeast(1)
+    } ?: nextZoom
     zoom = nextZoom
-    viewportOffset = anchor - imagePoint * nextZoom
+    viewportOffset = Offset(
+        x = anchor.x - imagePoint.x * renderZoomX,
+        y = anchor.y - imagePoint.y * renderZoomY
+    )
     clampViewport()
 }
+
+private fun Float.toIntRoundedAtLeastOne(): Int = roundToInt().coerceAtLeast(1)
 
 fun AppController.panViewport(delta: Offset) {
     if (delta == Offset.Zero) return

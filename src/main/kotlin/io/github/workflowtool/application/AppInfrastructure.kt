@@ -12,7 +12,6 @@ import io.github.workflowtool.domain.LayoutState
 import io.github.workflowtool.domain.NativeImageEngine
 import io.github.workflowtool.domain.RegionDetector
 import io.github.workflowtool.domain.RegionExporter
-import io.github.workflowtool.domain.RegionSplitter
 import io.github.workflowtool.model.CropRegion
 import io.github.workflowtool.model.DetectionConfig
 import io.github.workflowtool.model.DetectionMode
@@ -20,7 +19,6 @@ import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
 import io.github.workflowtool.model.ExportConfig
 import io.github.workflowtool.model.ExportResult
-import io.github.workflowtool.model.GridConfig
 import java.awt.image.BufferedImage
 
 abstract class BaseRegionDetector : RegionDetector {
@@ -61,13 +59,6 @@ class PythonRegionDetector : BaseRegionDetector() {
             ?.let { postProcessDetection(image, config, it) }
             ?: emptyDetectionResult()
     }
-}
-
-class CppRegionSplitter(
-    private val bridge: NativeDetectorBridge = CppDetectorBridge
-) : RegionSplitter {
-    override fun split(image: BufferedImage, config: GridConfig): List<CropRegion> =
-        bridge.splitGrid(image, config).orEmpty()
 }
 
 class JvmRegionExporter(
@@ -186,8 +177,6 @@ data class LayoutSpec(
 
 object ServiceFactory {
     fun detector(): RegionDetector = PythonRegionDetector()
-
-    fun splitter(): RegionSplitter = CppRegionSplitter()
 
     fun exporter(): RegionExporter = JvmRegionExporter()
 }

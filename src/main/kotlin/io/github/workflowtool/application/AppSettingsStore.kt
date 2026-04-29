@@ -1,7 +1,6 @@
 package io.github.workflowtool.application
 
 import io.github.workflowtool.model.DetectionConfig
-import io.github.workflowtool.model.GridConfig
 import io.github.workflowtool.model.ImageFormat
 import io.github.workflowtool.model.NamingMode
 import java.nio.file.Files
@@ -10,7 +9,6 @@ import kotlin.io.path.exists
 
 internal data class AppSettings(
     val detectionConfig: DetectionConfig = DetectionConfig(),
-    val gridConfig: GridConfig = GridConfig(),
     val outputDirectory: Path? = null,
     val outputFormat: ImageFormat = ImageFormat.PNG,
     val namingMode: NamingMode = NamingMode.Sequence,
@@ -38,7 +36,6 @@ internal object AppSettingsStore {
             val root = parseJsonObject(Files.readString(file, Charsets.UTF_8)) ?: return@runCatching AppSettings()
             AppSettings(
                 detectionConfig = readDetectionConfig(root["detectionConfig"]?.asObject()),
-                gridConfig = readGridConfig(root["gridConfig"]?.asObject()),
                 outputDirectory = root["outputDirectory"]?.asString()?.takeIf(String::isNotBlank)?.let(Path::of),
                 outputFormat = root["outputFormat"]?.asString()?.let { enumValueOrNull<ImageFormat>(it) } ?: ImageFormat.PNG,
                 namingMode = root["namingMode"]?.asString()?.let { enumValueOrNull<NamingMode>(it) } ?: NamingMode.Sequence,
@@ -92,29 +89,10 @@ internal object AppSettingsStore {
             bboxPadding = obj["bboxPadding"]?.asInt() ?: defaults.bboxPadding,
             mergeNearbyRegions = obj["mergeNearbyRegions"]?.asBoolean() ?: defaults.mergeNearbyRegions,
             removeSmallRegions = obj["removeSmallRegions"]?.asBoolean() ?: defaults.removeSmallRegions,
+            manualRefineExpansionRadius = obj["manualRefineExpansionRadius"]?.asInt() ?: defaults.manualRefineExpansionRadius,
+            manualRefineConflictTolerance = obj["manualRefineConflictTolerance"]?.asDouble() ?: defaults.manualRefineConflictTolerance,
             useManualBackground = obj["useManualBackground"]?.asBoolean() ?: defaults.useManualBackground,
             manualBackgroundArgb = obj["manualBackgroundArgb"]?.asInt() ?: defaults.manualBackgroundArgb
-        )
-    }
-
-    private fun readGridConfig(obj: JsonValue.JsonObject?): GridConfig {
-        val defaults = GridConfig()
-        if (obj == null) return defaults
-        return GridConfig(
-            cellWidth = obj["cellWidth"]?.asInt() ?: defaults.cellWidth,
-            cellHeight = obj["cellHeight"]?.asInt() ?: defaults.cellHeight,
-            columns = obj["columns"]?.asInt() ?: defaults.columns,
-            rows = obj["rows"]?.asInt() ?: defaults.rows,
-            offsetX = obj["offsetX"]?.asInt() ?: defaults.offsetX,
-            offsetY = obj["offsetY"]?.asInt() ?: defaults.offsetY,
-            gapX = obj["gapX"]?.asInt() ?: defaults.gapX,
-            gapY = obj["gapY"]?.asInt() ?: defaults.gapY,
-            snapToContent = obj["snapToContent"]?.asBoolean() ?: defaults.snapToContent,
-            searchPadding = obj["searchPadding"]?.asInt() ?: defaults.searchPadding,
-            ignoreEmptyCells = obj["ignoreEmptyCells"]?.asBoolean() ?: defaults.ignoreEmptyCells,
-            trimCellToContent = obj["trimCellToContent"]?.asBoolean() ?: defaults.trimCellToContent,
-            alphaThreshold = obj["alphaThreshold"]?.asInt() ?: defaults.alphaThreshold,
-            backgroundTolerance = obj["backgroundTolerance"]?.asInt() ?: defaults.backgroundTolerance
         )
     }
 
@@ -124,7 +102,6 @@ internal object AppSettingsStore {
     private fun AppSettings.toJson(): String = buildString {
         append("{\n")
         append("  \"detectionConfig\": ${detectionConfig.toJson()},\n")
-        append("  \"gridConfig\": ${gridConfig.toJson()},\n")
         append("  \"outputDirectory\": ${jsonString(outputDirectory?.toString().orEmpty())},\n")
         append("  \"outputFormat\": ${jsonString(outputFormat.name)},\n")
         append("  \"namingMode\": ${jsonString(namingMode.name)},\n")
@@ -157,25 +134,10 @@ internal object AppSettingsStore {
         "bboxPadding" to bboxPadding,
         "mergeNearbyRegions" to mergeNearbyRegions,
         "removeSmallRegions" to removeSmallRegions,
+        "manualRefineExpansionRadius" to manualRefineExpansionRadius,
+        "manualRefineConflictTolerance" to manualRefineConflictTolerance,
         "useManualBackground" to useManualBackground,
         "manualBackgroundArgb" to manualBackgroundArgb
-    )
-
-    private fun GridConfig.toJson(): String = compactJson(
-        "cellWidth" to cellWidth,
-        "cellHeight" to cellHeight,
-        "columns" to columns,
-        "rows" to rows,
-        "offsetX" to offsetX,
-        "offsetY" to offsetY,
-        "gapX" to gapX,
-        "gapY" to gapY,
-        "snapToContent" to snapToContent,
-        "searchPadding" to searchPadding,
-        "ignoreEmptyCells" to ignoreEmptyCells,
-        "trimCellToContent" to trimCellToContent,
-        "alphaThreshold" to alphaThreshold,
-        "backgroundTolerance" to backgroundTolerance
     )
 
     private fun compactJson(vararg values: Pair<String, Any>): String =

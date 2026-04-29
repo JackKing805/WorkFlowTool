@@ -1,14 +1,20 @@
 package io.github.workflowtool.application
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import io.github.workflowtool.model.CropRegion
-import io.github.workflowtool.model.SplitSource
+import io.github.workflowtool.model.hasMask
+import io.github.workflowtool.ui.editor.CheckerboardCellPx
+import io.github.workflowtool.ui.editor.CheckerboardDarkArgb
+import io.github.workflowtool.ui.editor.CheckerboardLightArgb
+import io.github.workflowtool.ui.editor.PixelGridStrongThreshold
+import io.github.workflowtool.ui.editor.PixelGridThreshold
 import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.Comparator
 import javax.imageio.ImageIO
 import kotlin.io.path.deleteIfExists
 import kotlin.io.path.exists
@@ -22,7 +28,6 @@ internal data class WorkspaceSnapshotEntry(
     val updatedAtEpochMillis: Long,
     val imageWidth: Int,
     val imageHeight: Int,
-    val splitSource: SplitSource,
     val hasManualEdits: Boolean,
     val baseRegions: List<CropRegion>,
     val regions: List<CropRegion>
@@ -62,7 +67,8 @@ internal object WorkspaceHistoryStore {
         val file = historyFile
         if (!file.exists()) return emptyList()
         return runCatching {
-            val root = parseJsonObject(Files.readString(file, Charsets.UTF_8)) ?: return@runCatching emptyList()
+            val text = sanitizeLegacyHistoryJson(Files.readString(file, Charsets.UTF_8))
+            val root = parseJsonObject(text) ?: return@runCatching emptyList()
             root["entries"]?.asArray()?.values
                 ?.mapNotNull { readEntry(it.asObject()) }
                 ?.sortedByDescending { it.updatedAtEpochMillis }
@@ -96,21 +102,14 @@ internal object WorkspaceHistoryStore {
 
     fun clear() {
         historyFile.deleteIfExists()
-        if (!previewRoot.exists()) return
-        Files.walk(previewRoot).use { stream ->
-            stream.sorted(Comparator.reverseOrder()).forEach { path ->
-                path.deleteIfExists()
-            }
-        }
+        deleteDirectory(previewRoot)
     }
 
     fun previewPathFor(id: String): Path = previewRoot.resolve("$id.png")
 
     private fun save(entries: List<WorkspaceSnapshotEntry>) {
-        runCatching {
-            Files.createDirectories(historyFile.parent)
-            Files.writeString(historyFile, entriesToJson(entries), Charsets.UTF_8)
-        }
+        Files.createDirectories(historyFile.parent)
+        Files.writeString(historyFile, entriesToJson(entries), Charsets.UTF_8)
     }
 
     private fun cleanupPreviewFiles(validIds: Set<String>) {
@@ -123,6 +122,13 @@ internal object WorkspaceHistoryStore {
                     path.deleteIfExists()
                 }
             }
+        }
+    }
+
+    private fun deleteDirectory(path: Path) {
+        if (!path.exists()) return
+        Files.walk(path).use { stream ->
+            stream.sorted(Comparator.reverseOrder()).forEach { it.deleteIfExists() }
         }
     }
 
@@ -143,7 +149,6 @@ internal object WorkspaceHistoryStore {
         append("\"updatedAtEpochMillis\":$updatedAtEpochMillis,")
         append("\"imageWidth\":$imageWidth,")
         append("\"imageHeight\":$imageHeight,")
-        append("\"splitSource\":${jsonString(splitSource.name)},")
         append("\"hasManualEdits\":$hasManualEdits,")
         append("\"baseRegions\":[${baseRegions.joinToString(",") { it.toJson() }}],")
         append("\"regions\":[${regions.joinToString(",") { it.toJson() }}]")
@@ -162,7 +167,7 @@ internal object WorkspaceHistoryStore {
         append("\"maskWidth\":$maskWidth,")
         append("\"maskHeight\":$maskHeight,")
         append("\"alphaMask\":[${alphaMask.joinToString(",")}],")
-        append("\"score\":${score?.toString() ?: "null"}")
+        append("\"score\":${score?.takeIf { it.isFinite() }?.toString() ?: "null"}")
         append("}")
     }
 
@@ -171,7 +176,6 @@ internal object WorkspaceHistoryStore {
         val paths = obj["sourcePaths"]?.asArray()?.values
             ?.mapNotNull { it.asString()?.takeIf(String::isNotBlank)?.let(Path::of) }
             .orEmpty()
-        val splitSource = obj["splitSource"]?.asString()?.let(::splitSourceOrNull) ?: SplitSource.AutoDetect
         return WorkspaceSnapshotEntry(
             id = obj["id"]?.asString().orEmpty(),
             title = obj["title"]?.asString().orEmpty(),
@@ -180,7 +184,6 @@ internal object WorkspaceHistoryStore {
             updatedAtEpochMillis = obj["updatedAtEpochMillis"]?.asLong() ?: 0L,
             imageWidth = obj["imageWidth"]?.asInt() ?: 0,
             imageHeight = obj["imageHeight"]?.asInt() ?: 0,
-            splitSource = splitSource,
             hasManualEdits = obj["hasManualEdits"]?.asBoolean() ?: false,
             baseRegions = obj["baseRegions"]?.asArray()?.values?.mapNotNull { readRegion(it.asObject()) }.orEmpty(),
             regions = obj["regions"]?.asArray()?.values?.mapNotNull { readRegion(it.asObject()) }.orEmpty()
@@ -204,9 +207,6 @@ internal object WorkspaceHistoryStore {
         )
     }
 
-    private fun splitSourceOrNull(name: String): SplitSource? =
-        enumValues<SplitSource>().firstOrNull { it.name == name }
-
     private fun jsonString(value: String): String =
         buildString {
             append('"')
@@ -226,44 +226,170 @@ internal object WorkspaceHistoryStore {
             }
             append('"')
         }
+
+    private fun sanitizeLegacyHistoryJson(text: String): String =
+        text.replace(Regex(""""score"\s*:\s*(NaN|Infinity|-Infinity)"""), """"score":null""")
 }
 
 internal fun buildWorkspaceSnapshotId(sourcePaths: List<Path>): String =
     sha256(sourcePaths.joinToString("\n") { it.toAbsolutePath().normalize().toString() }).take(24)
 
-internal fun buildWorkspaceSnapshotPreview(image: BufferedImage, regions: List<CropRegion>): BufferedImage {
-    val scale = minOf(320.0 / image.width.coerceAtLeast(1), 192.0 / image.height.coerceAtLeast(1), 1.0)
-    val width = (image.width * scale).roundToInt().coerceAtLeast(1)
-    val height = (image.height * scale).roundToInt().coerceAtLeast(1)
+internal fun buildWorkspaceSnapshotPreview(
+    image: BufferedImage,
+    regions: List<CropRegion>,
+    zoom: Float,
+    viewportOffset: Offset,
+    viewportSize: Size,
+    showGrid: Boolean
+): BufferedImage {
+    val width = viewportSize.width.roundToInt().takeIf { it > 0 } ?: 320
+    val height = viewportSize.height.roundToInt().takeIf { it > 0 } ?: 192
+    val resolvedZoom = zoom.takeIf { it > 0f } ?: minOf(
+        width.toFloat() / image.width.coerceAtLeast(1),
+        height.toFloat() / image.height.coerceAtLeast(1)
+    ).coerceIn(0.1f, 8f)
+    val resolvedOffset = if (viewportSize.width > 0f && viewportSize.height > 0f) {
+        viewportOffset
+    } else {
+        Offset(
+            x = (width - image.width * resolvedZoom) / 2f,
+            y = (height - image.height * resolvedZoom) / 2f
+        )
+    }
     val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
     val graphics = output.createGraphics()
-    graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+    graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
     graphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-    graphics.drawImage(image, 0, 0, width, height, null)
+    graphics.color = Color(0xE1, 0xE4, 0xE8)
+    graphics.fillRect(0, 0, width, height)
+    drawSnapshotCheckerboard(graphics, width, height, resolvedZoom, resolvedOffset)
+    if (showGrid) drawSnapshotGrid(graphics, width, height, resolvedZoom, resolvedOffset)
+    graphics.drawImage(
+        image,
+        resolvedOffset.x.roundToInt(),
+        resolvedOffset.y.roundToInt(),
+        (image.width * resolvedZoom).roundToInt(),
+        (image.height * resolvedZoom).roundToInt(),
+        null
+    )
 
-    val visibleColor = Color(0x2F, 0x6B, 0xFF, 58)
-    val visibleStroke = Color(0x7E, 0xB1, 0xFF, 220)
-    val hiddenColor = Color(0x8C, 0x96, 0xA8, 36)
-    val hiddenStroke = Color(0xB9, 0xC0, 0xCD, 170)
-    val strokeWidth = (1.5f + scale.toFloat()).coerceAtLeast(1.2f)
-
-    regions.take(240).forEach { region ->
-        val x = (region.x * scale).roundToInt()
-        val y = (region.y * scale).roundToInt()
-        val regionWidth = (region.width * scale).roundToInt().coerceAtLeast(1)
-        val regionHeight = (region.height * scale).roundToInt().coerceAtLeast(1)
-        graphics.color = if (region.visible) visibleColor else hiddenColor
-        graphics.fillRect(x, y, regionWidth, regionHeight)
-        graphics.color = if (region.visible) visibleStroke else hiddenStroke
-        graphics.stroke = BasicStroke(strokeWidth)
-        graphics.drawRect(x, y, regionWidth, regionHeight)
+    regions.filter { it.visible }.take(240).forEach { region ->
+        drawSnapshotRegion(graphics, region, resolvedZoom, resolvedOffset)
     }
-
-    val label = "${regions.size} 个区域"
-    graphics.color = Color(0x0E, 0x12, 0x18, 188)
-    graphics.fillRoundRect(8, 8, 96, 28, 12, 12)
-    graphics.color = Color.WHITE
-    graphics.drawString(label, 16, 27)
     graphics.dispose()
     return output
+}
+
+private fun drawSnapshotCheckerboard(graphics: java.awt.Graphics2D, width: Int, height: Int, zoom: Float, offset: Offset) {
+    val cell = CheckerboardCellPx
+    val dark = Color(CheckerboardDarkArgb, true)
+    val light = Color(CheckerboardLightArgb, true)
+    var y = kotlin.math.floor(-offset.y / cell) * cell + offset.y
+    var row = kotlin.math.floor((y - offset.y) / cell).toInt()
+    while (y < height) {
+        var x = kotlin.math.floor(-offset.x / cell) * cell + offset.x
+        var column = kotlin.math.floor((x - offset.x) / cell).toInt()
+        while (x < width) {
+            graphics.color = if ((row + column) % 2 == 0) dark else light
+            graphics.fillRect(x.roundToInt(), y.roundToInt(), cell.roundToInt().coerceAtLeast(1), cell.roundToInt().coerceAtLeast(1))
+            x += cell
+            column += 1
+        }
+        y += cell
+        row += 1
+    }
+}
+
+private fun drawSnapshotGrid(graphics: java.awt.Graphics2D, width: Int, height: Int, zoom: Float, offset: Offset) {
+    val spacing = 48f * zoom.coerceAtLeast(0.4f)
+    graphics.color = Color(255, 255, 255, 31)
+    graphics.stroke = BasicStroke(1f)
+    var x = offset.x % spacing
+    while (x <= width) {
+        graphics.drawLine(x.roundToInt(), 0, x.roundToInt(), height)
+        x += spacing
+    }
+    var y = offset.y % spacing
+    while (y <= height) {
+        graphics.drawLine(0, y.roundToInt(), width, y.roundToInt())
+        y += spacing
+    }
+    drawSnapshotPixelGrid(graphics, width, height, zoom, offset)
+}
+
+private fun drawSnapshotPixelGrid(graphics: java.awt.Graphics2D, width: Int, height: Int, zoom: Float, offset: Offset) {
+    if (zoom < PixelGridThreshold) return
+    val alpha = if (zoom >= PixelGridStrongThreshold) 87 else 46
+    graphics.color = Color(0, 0, 0, alpha)
+    graphics.stroke = BasicStroke(1f)
+    var x = offset.x % zoom
+    if (x > 0f) x -= zoom
+    while (x <= width) {
+        graphics.drawLine(x.roundToInt(), 0, x.roundToInt(), height)
+        x += zoom
+    }
+    var y = offset.y % zoom
+    if (y > 0f) y -= zoom
+    while (y <= height) {
+        graphics.drawLine(0, y.roundToInt(), width, y.roundToInt())
+        y += zoom
+    }
+}
+
+private fun drawSnapshotRegion(graphics: java.awt.Graphics2D, region: CropRegion, zoom: Float, offset: Offset) {
+    val fill = if (region.selected) Color(0xF3, 0xA2, 0x3C, 38) else Color(0x1F, 0x4A, 0x82, 8)
+    val stroke = if (region.selected) Color(0x11, 0x11, 0x11, 240) else Color(0x6B, 0x7E, 0xA1, 192)
+    graphics.color = fill
+    if (region.hasMask()) {
+        drawSnapshotMask(graphics, region, zoom, offset, fill, stroke)
+        return
+    }
+    val x = (region.x * zoom + offset.x).roundToInt()
+    val y = (region.y * zoom + offset.y).roundToInt()
+    val w = (region.width * zoom).roundToInt().coerceAtLeast(1)
+    val h = (region.height * zoom).roundToInt().coerceAtLeast(1)
+    graphics.fillRect(x, y, w, h)
+    graphics.color = stroke
+    graphics.stroke = BasicStroke(if (region.selected) 2f else 1.25f)
+    graphics.drawRect(x, y, w, h)
+}
+
+private fun drawSnapshotMask(
+    graphics: java.awt.Graphics2D,
+    region: CropRegion,
+    zoom: Float,
+    offset: Offset,
+    fill: Color,
+    stroke: Color
+) {
+    for (localY in 0 until region.maskHeight) {
+        var localX = 0
+        while (localX < region.maskWidth) {
+            val alpha = region.alphaMask[localY * region.maskWidth + localX].coerceIn(0, 255)
+            if (alpha <= 0) {
+                localX += 1
+                continue
+            }
+            val startX = localX
+            while (localX + 1 < region.maskWidth && region.alphaMask[localY * region.maskWidth + localX + 1] > 0) {
+                localX += 1
+            }
+            graphics.color = Color(fill.red, fill.green, fill.blue, (fill.alpha * (0.60f + 0.40f * alpha / 255f)).roundToInt().coerceIn(0, 255))
+            graphics.fillRect(
+                ((region.x + startX) * zoom + offset.x).roundToInt(),
+                ((region.y + localY) * zoom + offset.y).roundToInt(),
+                ((localX - startX + 1) * zoom).roundToInt().coerceAtLeast(1),
+                zoom.roundToInt().coerceAtLeast(1)
+            )
+            localX += 1
+        }
+    }
+    graphics.color = stroke
+    graphics.stroke = BasicStroke(if (region.selected) 2f else 1.25f)
+    graphics.drawRect(
+        (region.x * zoom + offset.x).roundToInt(),
+        (region.y * zoom + offset.y).roundToInt(),
+        (region.width * zoom).roundToInt().coerceAtLeast(1),
+        (region.height * zoom).roundToInt().coerceAtLeast(1)
+    )
 }

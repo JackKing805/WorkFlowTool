@@ -10,11 +10,14 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from offline_common import canonicalize_record, read_jsonl
+
+MODEL_ARCHITECTURE = "local_unet_icon_segmentation_v3"
 
 
 def configure_stdio() -> None:
@@ -97,6 +100,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--imgsz", type=int, default=256)
     parser.add_argument("--batch", type=int, default=2)
+    parser.add_argument("--resume", default="", help="Optional existing local model.pt to continue training from.")
+    parser.add_argument("--lr", type=float, default=0.002)
+    parser.add_argument("--bce-weight", type=float, default=0.55)
+    parser.add_argument("--dice-weight", type=float, default=0.30)
+    parser.add_argument("--focal-weight", type=float, default=0.15)
+    parser.add_argument("--score-threshold", type=float, default=0.18)
+    parser.add_argument("--mask-threshold", type=float, default=0.28)
     return parser.parse_args()
 
 
@@ -104,11 +114,33 @@ def augment_pair(image: Image.Image, target: Image.Image) -> Tuple[Image.Image, 
     if random.random() < 0.5:
         image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         target = target.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if random.random() < 0.35:
+        angle = random.uniform(-7.0, 7.0)
+        image = image.rotate(angle, resample=Image.Resampling.BILINEAR, fillcolor=(0, 0, 0, 0))
+        target = target.rotate(angle, resample=Image.Resampling.NEAREST, fillcolor=0)
+    if random.random() < 0.45:
+        max_shift = max(2, int(min(image.size) * 0.08))
+        dx = random.randint(-max_shift, max_shift)
+        dy = random.randint(-max_shift, max_shift)
+        shifted_image = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        shifted_target = Image.new("L", target.size, 0)
+        shifted_image.paste(image, (dx, dy))
+        shifted_target.paste(target, (dx, dy))
+        image, target = shifted_image, shifted_target
     array = np.asarray(image, dtype=np.float32)
-    contrast = random.uniform(0.88, 1.12)
-    brightness = random.uniform(-10.0, 10.0)
-    noise = np.random.normal(0.0, 2.0, array.shape).astype(np.float32)
+    contrast = random.uniform(0.80, 1.22)
+    brightness = random.uniform(-16.0, 16.0)
+    noise = np.random.normal(0.0, 3.0, array.shape).astype(np.float32)
     array[:, :, :3] = np.clip((array[:, :, :3] - 127.5) * contrast + 127.5 + brightness + noise[:, :, :3], 0, 255)
+    if random.random() < 0.35:
+        target_array = np.asarray(target, dtype=np.uint8)
+        background = target_array <= 0
+        tint = np.array(
+            [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)],
+            dtype=np.float32,
+        )
+        mix = random.uniform(0.03, 0.10)
+        array[:, :, :3][background] = np.clip(array[:, :, :3][background] * (1.0 - mix) + tint * mix, 0, 255)
     return Image.fromarray(array.astype(np.uint8), mode="RGBA"), target
 
 
@@ -117,6 +149,58 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     intersection = (probabilities * target).sum(dim=(1, 2, 3))
     denominator = probabilities.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
     return (1.0 - ((2.0 * intersection + 1.0) / (denominator + 1.0))).mean()
+
+
+def focal_loss(logits: torch.Tensor, target: torch.Tensor, pos_weight: torch.Tensor, gamma: float = 2.0) -> torch.Tensor:
+    bce = F.binary_cross_entropy_with_logits(logits, target, pos_weight=pos_weight, reduction="none")
+    probabilities = torch.sigmoid(logits)
+    pt = torch.where(target > 0.5, probabilities, 1.0 - probabilities).clamp(1e-4, 1.0)
+    return ((1.0 - pt) ** gamma * bce).mean()
+
+
+def target_foreground_ratio(records: List[Dict[str, Any]], image_size: int) -> float:
+    dataset = IconMaskDataset(records, image_size, augment=False)
+    foreground = 0.0
+    total = 0.0
+    for _, target in dataset:
+        foreground += float((target > 0.05).sum().item())
+        total += float(target.numel())
+    return foreground / max(1.0, total)
+
+
+def batch_pos_weight(target: torch.Tensor) -> torch.Tensor:
+    foreground = torch.clamp((target > 0.05).sum().float(), min=1.0)
+    background = torch.clamp(target.numel() - foreground, min=1.0)
+    value = torch.clamp(background / foreground, min=2.0, max=80.0)
+    return value.to(device=target.device, dtype=target.dtype)
+
+
+def validation_stats(model: nn.Module, records: List[Dict[str, Any]], image_size: int, mask_threshold: float) -> Dict[str, float]:
+    dataset = IconMaskDataset(records, image_size, augment=False)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+    max_probability = 0.0
+    mean_probability = 0.0
+    predicted_ratio = 0.0
+    dice_scores: List[float] = []
+    count = 0
+    model.eval()
+    with torch.no_grad():
+        for image, target in loader:
+            probabilities = torch.sigmoid(model(image))
+            max_probability = max(max_probability, float(probabilities.max().cpu()))
+            mean_probability += float(probabilities.mean().cpu())
+            predicted = probabilities >= mask_threshold
+            predicted_ratio += float(predicted.float().mean().cpu())
+            intersection = float((predicted.float() * (target > 0.05).float()).sum().cpu())
+            denominator = float(predicted.float().sum().cpu() + (target > 0.05).float().sum().cpu())
+            dice_scores.append((2.0 * intersection + 1.0) / (denominator + 1.0))
+            count += 1
+    return {
+        "maxProbability": max_probability,
+        "meanProbability": mean_probability / max(1, count),
+        "predictedForegroundRatio": predicted_ratio / max(1, count),
+        "meanDiceAtThreshold": sum(dice_scores) / max(1, len(dice_scores)),
+    }
 
 
 def main() -> int:
@@ -140,10 +224,25 @@ def main() -> int:
     random.seed(17)
     np.random.seed(17)
     model = TinyIconSegmentation()
+    resume_path = resolve_under(root, args.resume) if args.resume else None
+    resumed_from = ""
+    if resume_path is not None and resume_path.exists():
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else None
+        if isinstance(state_dict, dict):
+            model.load_state_dict(state_dict, strict=True)
+            resumed_from = str(resume_path)
+        else:
+            print(json.dumps({"ok": False, "reason": "resume checkpoint has no state_dict", "resume": str(resume_path)}, ensure_ascii=False))
+            return 4
     dataset = IconMaskDataset(records, int(args.imgsz), augment=True)
     loader = DataLoader(dataset, batch_size=max(1, int(args.batch)), shuffle=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.002)
-    loss_fn = nn.BCEWithLogitsLoss()
+    learning_rate = max(0.00005, min(float(args.lr), 0.01))
+    bce_weight, dice_weight, focal_weight = normalized_loss_weights(args.bce_weight, args.dice_weight, args.focal_weight)
+    score_threshold = max(0.05, min(float(args.score_threshold), 0.95))
+    mask_threshold = max(0.05, min(float(args.mask_threshold), 0.95))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    foreground_ratio = target_foreground_ratio(records, int(args.imgsz))
 
     model.train()
     losses: List[float] = []
@@ -151,10 +250,31 @@ def main() -> int:
         for image, target in loader:
             optimizer.zero_grad(set_to_none=True)
             logits = model(image)
-            loss = loss_fn(logits, target) + dice_loss(logits, target)
+            pos_weight = batch_pos_weight(target)
+            bce = F.binary_cross_entropy_with_logits(logits, target, pos_weight=pos_weight)
+            loss = (
+                (bce_weight * bce) +
+                (dice_weight * dice_loss(logits, target)) +
+                (focal_weight * focal_loss(logits, target, pos_weight))
+            )
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
+
+    validation = validation_stats(model, records, int(args.imgsz), mask_threshold)
+    if validation["maxProbability"] < score_threshold or validation["predictedForegroundRatio"] <= 0.00001:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "reason": "trained model predicts no foreground",
+                    "foregroundRatio": foreground_ratio,
+                    "validation": validation,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 3
 
     weights_path = output_root / "model.pt"
     onnx_path = output_root / "model.onnx"
@@ -174,11 +294,11 @@ def main() -> int:
     metadata = {
         "version": 2,
         "backend": "mask_rcnn_onnx",
-        "architecture": "light_unet_icon_segmentation_v2",
+        "architecture": MODEL_ARCHITECTURE,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "inputSize": int(args.imgsz),
-        "scoreThreshold": 0.35,
-        "maskThreshold": 0.5,
+        "scoreThreshold": score_threshold,
+        "maskThreshold": mask_threshold,
         "labels": ["icon"],
         "training": {
             "dataset": args.dataset,
@@ -186,7 +306,17 @@ def main() -> int:
             "epochs": int(args.epochs),
             "batch": int(args.batch),
             "meanLoss": round(sum(losses) / max(1, len(losses)), 6),
+            "finalLoss": round(losses[-1], 6) if losses else 0.0,
+            "foregroundRatio": round(foreground_ratio, 8),
+            "validation": {key: round(value, 8) for key, value in validation.items()},
+            "learningRate": round(learning_rate, 8),
+            "lossWeights": {
+                "bce": round(bce_weight, 6),
+                "dice": round(dice_weight, 6),
+                "focal": round(focal_weight, 6),
+            },
             "pretrained": False,
+            "resumedFrom": resumed_from,
         },
         "license": "Generated locally from user/project training data; no pretrained weights bundled.",
     }
@@ -200,6 +330,14 @@ def resolve_under(root: Path, value: str) -> Path:
     if not path.is_absolute():
         path = (root / path).resolve()
     return path
+
+
+def normalized_loss_weights(bce: float, dice: float, focal: float) -> Tuple[float, float, float]:
+    values = [max(0.0, float(bce)), max(0.0, float(dice)), max(0.0, float(focal))]
+    total = sum(values)
+    if total <= 0.0:
+        return 0.55, 0.30, 0.15
+    return values[0] / total, values[1] / total, values[2] / total
 
 
 if __name__ == "__main__":
