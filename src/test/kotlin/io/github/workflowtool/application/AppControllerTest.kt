@@ -613,6 +613,15 @@ class AppControllerTest {
             trainingType = "最近样本微调",
             message = "已更新",
             thumbnailPath = createImageFile(width = 12, height = 12).toPath(),
+            preview = ModelEvolutionPreviewResult(
+                beforeOverlayPath = createImageFile(width = 12, height = 12).toPath(),
+                afterOverlayPath = createImageFile(width = 12, height = 12).toPath(),
+                beforeRegionCount = 1,
+                afterRegionCount = 2,
+                beforeMaxScore = 0.42f,
+                afterMaxScore = 0.71f,
+                visualSummary = "识别数 1 -> 2，最高置信度 0.42 -> 0.71"
+            ),
             before = before,
             after = after
         ).copy(id = "newer", createdAtEpochMillis = 20)
@@ -623,7 +632,9 @@ class AppControllerTest {
 
         assertEquals(listOf("newer", "older"), loaded.map { it.id })
         assertEquals(ModelEvolutionStatus.Updated, loaded.first().status)
-        assertTrue(loaded.first().changes.any { it.label == "遮罩阈值" })
+        assertEquals(2, loaded.first().afterRegionCount)
+        assertTrue(loaded.first().visualSummary.contains("识别数 1 -> 2"))
+        assertTrue(loaded.first().changes.any { it.label == "Mask threshold" })
         ModelEvolutionStore.clear()
     }
 
@@ -634,9 +645,27 @@ class AppControllerTest {
 
         val changes = buildLearningConfigChanges(before, after)
 
-        assertEquals(listOf("遮罩阈值"), changes.map { it.label })
+        assertEquals(listOf("Mask threshold"), changes.map { it.label })
         assertEquals("0.280", changes.single().before)
         assertEquals("0.240", changes.single().after)
+    }
+
+    @Test
+    fun detectionOverlayWritesVisiblePreviewImage() {
+        val source = javax.imageio.ImageIO.read(createImageFile(width = 48, height = 36))
+        val result = DetectionResult(
+            regions = listOf(CropRegion("r", 4, 4, 12, 12, score = 0.75f)),
+            mode = DetectionMode.SOLID_BACKGROUND,
+            stats = DetectionStats(0, 0, 1, 1, 0, 0)
+        )
+
+        val overlay = drawDetectionOverlay(source, result, "训练后")
+
+        assertTrue(overlay.width > 0)
+        assertTrue(overlay.height > 0)
+        assertTrue((0 until overlay.width).any { x ->
+            (0 until overlay.height).any { y -> overlay.getRGB(x, y) != 0 }
+        })
     }
 
     @Test

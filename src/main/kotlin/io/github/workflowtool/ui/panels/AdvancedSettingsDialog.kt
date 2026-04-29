@@ -234,18 +234,40 @@ private fun EvolutionEntryRow(entry: ModelEvolutionEntry) {
         ModelEvolutionStatus.Waiting -> Color(0xFFF3C969)
         ModelEvolutionStatus.Failed -> Color(0xFFFF8A8A)
     }
-    Row(
+    Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(Color(0xFF171C23))
             .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(6.dp)).padding(10.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        EvolutionThumbnail(entry.thumbnailPath)
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(evolutionStatusLabel(entry.status), color = statusColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Text(entry.source, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Text(formatEvolutionTime(entry.createdAtEpochMillis), color = TextDim, fontSize = 12.sp)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(evolutionStatusLabel(entry.status), color = statusColor, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(entry.source, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(formatEvolutionTime(entry.createdAtEpochMillis), color = TextDim, fontSize = 12.sp)
+        }
+        if (entry.beforeOverlayPath != null || entry.afterOverlayPath != null) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                EvolutionPreviewPanel("训练前", entry.beforeOverlayPath, Modifier.weight(1f))
+                EvolutionPreviewPanel("训练后", entry.afterOverlayPath, Modifier.weight(1f))
             }
+            Text(
+                entry.visualSummary.ifBlank {
+                    "识别数 ${entry.beforeRegionCount} -> ${entry.afterRegionCount}"
+                },
+                color = Color(0xFFB8C7E6),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                EvolutionThumbnail(entry.thumbnailPath)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(entry.message, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("暂未生成前后对比图", color = TextDim, fontSize = 12.sp)
+                }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
                 "${entry.trainingType} · 样本 ${entry.sampleCount} · Revision ${entry.revisionBefore} -> ${entry.revisionAfter}",
                 color = TextDim,
@@ -253,7 +275,9 @@ private fun EvolutionEntryRow(entry: ModelEvolutionEntry) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Text(entry.message, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (entry.beforeOverlayPath != null || entry.afterOverlayPath != null) {
+                Text(entry.message, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
             Text(
                 if (entry.changes.isEmpty()) {
                     "参数未变化"
@@ -270,14 +294,27 @@ private fun EvolutionEntryRow(entry: ModelEvolutionEntry) {
 }
 
 @Composable
+private fun EvolutionPreviewPanel(title: String, path: NioPath?, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(title, color = TextDim, fontSize = 12.sp)
+        EvolutionImage(path, heightDp = 132)
+    }
+}
+
+@Composable
 private fun EvolutionThumbnail(path: NioPath?) {
+    EvolutionImage(path, heightDp = 72, modifier = Modifier.width(92.dp))
+}
+
+@Composable
+private fun EvolutionImage(path: NioPath?, heightDp: Int, modifier: Modifier = Modifier.fillMaxWidth()) {
     val bitmap = remember(path) {
         runCatching {
             path?.takeIf { it.toFile().isFile }?.let { ImageIO.read(it.toFile())?.toComposeImageBitmap() }
         }.getOrNull()
     }
     Box(
-        Modifier.width(92.dp).height(72.dp).clip(RoundedCornerShape(5.dp))
+        modifier.height(heightDp.dp).clip(RoundedCornerShape(5.dp))
             .border(1.dp, Color(0xFF2D3440), RoundedCornerShape(5.dp)),
         contentAlignment = Alignment.Center
     ) {
@@ -290,7 +327,7 @@ private fun EvolutionThumbnail(path: NioPath?) {
                 contentScale = ContentScale.Fit
             )
         } else {
-            Text("无缩略图", color = TextDim, fontSize = 11.sp)
+            Text("无对比图", color = TextDim, fontSize = 11.sp)
         }
     }
 }
