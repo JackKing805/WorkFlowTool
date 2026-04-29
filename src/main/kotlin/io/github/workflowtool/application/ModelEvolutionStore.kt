@@ -14,6 +14,13 @@ data class ModelEvolutionEntry(
     val trainingType: String,
     val message: String,
     val thumbnailPath: Path?,
+    val beforeOverlayPath: Path? = null,
+    val afterOverlayPath: Path? = null,
+    val beforeRegionCount: Int = 0,
+    val afterRegionCount: Int = 0,
+    val beforeMaxScore: Float? = null,
+    val afterMaxScore: Float? = null,
+    val visualSummary: String = "",
     val revisionBefore: Int,
     val revisionAfter: Int,
     val changes: List<ModelEvolutionChange>
@@ -84,6 +91,13 @@ internal object ModelEvolutionStore {
         append("\"trainingType\":${jsonString(trainingType)},")
         append("\"message\":${jsonString(message)},")
         append("\"thumbnailPath\":${thumbnailPath?.let { jsonString(it.toString()) } ?: "null"},")
+        append("\"beforeOverlayPath\":${beforeOverlayPath?.let { jsonString(it.toString()) } ?: "null"},")
+        append("\"afterOverlayPath\":${afterOverlayPath?.let { jsonString(it.toString()) } ?: "null"},")
+        append("\"beforeRegionCount\":$beforeRegionCount,")
+        append("\"afterRegionCount\":$afterRegionCount,")
+        append("\"beforeMaxScore\":${beforeMaxScore ?: "null"},")
+        append("\"afterMaxScore\":${afterMaxScore ?: "null"},")
+        append("\"visualSummary\":${jsonString(visualSummary)},")
         append("\"revisionBefore\":$revisionBefore,")
         append("\"revisionAfter\":$revisionAfter,")
         append("\"changes\":[${changes.joinToString(",") { it.toJson() }}]")
@@ -107,6 +121,13 @@ internal object ModelEvolutionStore {
             trainingType = obj["trainingType"]?.asString().orEmpty(),
             message = obj["message"]?.asString().orEmpty(),
             thumbnailPath = obj["thumbnailPath"]?.asString()?.takeIf(String::isNotBlank)?.let(Path::of),
+            beforeOverlayPath = obj["beforeOverlayPath"]?.asString()?.takeIf(String::isNotBlank)?.let(Path::of),
+            afterOverlayPath = obj["afterOverlayPath"]?.asString()?.takeIf(String::isNotBlank)?.let(Path::of),
+            beforeRegionCount = obj["beforeRegionCount"]?.asInt() ?: 0,
+            afterRegionCount = obj["afterRegionCount"]?.asInt() ?: 0,
+            beforeMaxScore = obj["beforeMaxScore"]?.asFloat(),
+            afterMaxScore = obj["afterMaxScore"]?.asFloat(),
+            visualSummary = obj["visualSummary"]?.asString().orEmpty(),
             revisionBefore = obj["revisionBefore"]?.asInt() ?: 0,
             revisionAfter = obj["revisionAfter"]?.asInt() ?: 0,
             changes = obj["changes"]?.asArray()?.values?.mapNotNull { readChange(it.asObject()) }.orEmpty()
@@ -148,6 +169,7 @@ fun buildModelEvolutionEntry(
     trainingType: String,
     message: String,
     thumbnailPath: Path?,
+    preview: ModelEvolutionPreviewResult? = null,
     before: LearningConfig,
     after: LearningConfig
 ): ModelEvolutionEntry {
@@ -162,6 +184,13 @@ fun buildModelEvolutionEntry(
         trainingType = trainingType,
         message = message,
         thumbnailPath = thumbnailPath,
+        beforeOverlayPath = preview?.beforeOverlayPath,
+        afterOverlayPath = preview?.afterOverlayPath,
+        beforeRegionCount = preview?.beforeRegionCount ?: 0,
+        afterRegionCount = preview?.afterRegionCount ?: 0,
+        beforeMaxScore = preview?.beforeMaxScore,
+        afterMaxScore = preview?.afterMaxScore,
+        visualSummary = preview?.visualSummary.orEmpty(),
         revisionBefore = before.revision,
         revisionAfter = after.revision,
         changes = buildLearningConfigChanges(before, after)
@@ -169,14 +198,14 @@ fun buildModelEvolutionEntry(
 }
 
 fun buildLearningConfigChanges(before: LearningConfig, after: LearningConfig): List<ModelEvolutionChange> = buildList {
-    addIfChanged("遮罩阈值", before.maskThreshold, after.maskThreshold)
-    addIfChanged("置信度阈值", before.scoreThreshold, after.scoreThreshold)
-    addIfChanged("最近样本轮数", before.recentFineTuneEpochs, after.recentFineTuneEpochs)
-    addIfChanged("完整重训轮数", before.fullRetrainEpochs, after.fullRetrainEpochs)
-    addIfChanged("Dice 权重", before.diceWeight, after.diceWeight)
-    addIfChanged("Focal 权重", before.focalWeight, after.focalWeight)
-    addIfChanged("最小组件像素", before.minComponentPixels, after.minComponentPixels)
-    addIfChanged("反馈样本数", before.feedbackSamplesSeen, after.feedbackSamplesSeen)
+    addIfChanged("Mask threshold", before.maskThreshold, after.maskThreshold)
+    addIfChanged("Score threshold", before.scoreThreshold, after.scoreThreshold)
+    addIfChanged("Recent epochs", before.recentFineTuneEpochs, after.recentFineTuneEpochs)
+    addIfChanged("Full epochs", before.fullRetrainEpochs, after.fullRetrainEpochs)
+    addIfChanged("Dice weight", before.diceWeight, after.diceWeight)
+    addIfChanged("Focal weight", before.focalWeight, after.focalWeight)
+    addIfChanged("Min component pixels", before.minComponentPixels, after.minComponentPixels)
+    addIfChanged("Feedback samples", before.feedbackSamplesSeen, after.feedbackSamplesSeen)
 }
 
 private fun MutableList<ModelEvolutionChange>.addIfChanged(label: String, before: Double, after: Double) {

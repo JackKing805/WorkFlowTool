@@ -7,6 +7,7 @@ import io.github.workflowtool.model.DetectionResult
 import io.github.workflowtool.model.DetectionStats
 import java.awt.image.BufferedImage
 import java.nio.file.Files
+import java.nio.file.Path
 import javax.imageio.ImageIO
 import kotlin.io.path.exists
 
@@ -19,8 +20,17 @@ internal object PythonDetectorBridge {
         get() = PythonRuntime.status(scriptAvailable = script.exists(), script = script)
 
     fun detect(image: BufferedImage, config: DetectionConfig): DetectionResult? {
+        return detectWithModel(
+            image = image,
+            config = config,
+            model = AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.onnx")
+        )
+    }
+
+    fun detectWithModel(image: BufferedImage, config: DetectionConfig, model: Path): DetectionResult? {
         val environment = PythonEnvironmentManager.ensureReady()
         if (!environment.ready) return null
+        if (!model.exists()) return null
         val temp = Files.createTempFile("workflowtool-python-detect", ".png")
         return try {
             ImageIO.write(image, "png", temp.toFile())
@@ -30,7 +40,7 @@ internal object PythonDetectorBridge {
                     "--image",
                     temp.toString(),
                     "--model",
-                    AppRuntimeFiles.pythonDir.resolve("model").resolve("instance_segmentation").resolve("model.onnx").toString(),
+                    model.toString(),
                     "--score-threshold",
                     scoreThreshold(config).toString(),
                     "--mask-threshold",

@@ -59,6 +59,7 @@ internal object AppRuntimeFiles {
             appDataRoot.resolve("python_detector").resolve("model").resolve("instance_segmentation_previous"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("combined"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("magic"),
+            appDataRoot.resolve("python_detector").resolve("model").resolve("evolution-previews"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("runtime-model-state.json"),
             appDataRoot.resolve("python_detector").resolve("model").resolve("evolution-history.json")
         )

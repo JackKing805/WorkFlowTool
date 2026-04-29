@@ -592,6 +592,54 @@ class AppControllerTest {
     }
 
     @Test
+    fun modelEvolutionStorePersistsEntriesInNewestFirstOrder() {
+        ModelEvolutionStore.clear()
+        val before = LearningConfig(revision = 1, feedbackSamplesSeen = 1)
+        val after = before.copy(revision = 2, maskThreshold = 0.24, feedbackSamplesSeen = 3)
+        val older = buildModelEvolutionEntry(
+            source = "精修确认",
+            status = ModelEvolutionStatus.Waiting,
+            sampleCount = 1,
+            trainingType = "等待更多样本",
+            message = "等待",
+            thumbnailPath = null,
+            before = before,
+            after = before
+        ).copy(id = "older", createdAtEpochMillis = 10)
+        val newer = buildModelEvolutionEntry(
+            source = "导出确认",
+            status = ModelEvolutionStatus.Updated,
+            sampleCount = 3,
+            trainingType = "最近样本微调",
+            message = "已更新",
+            thumbnailPath = createImageFile(width = 12, height = 12).toPath(),
+            before = before,
+            after = after
+        ).copy(id = "newer", createdAtEpochMillis = 20)
+
+        ModelEvolutionStore.append(older)
+        ModelEvolutionStore.append(newer)
+        val loaded = ModelEvolutionStore.load()
+
+        assertEquals(listOf("newer", "older"), loaded.map { it.id })
+        assertEquals(ModelEvolutionStatus.Updated, loaded.first().status)
+        assertTrue(loaded.first().changes.any { it.label == "遮罩阈值" })
+        ModelEvolutionStore.clear()
+    }
+
+    @Test
+    fun learningConfigChangesOnlyIncludesChangedValues() {
+        val before = LearningConfig(revision = 1, maskThreshold = 0.28, scoreThreshold = 0.18)
+        val after = before.copy(revision = 2, maskThreshold = 0.24)
+
+        val changes = buildLearningConfigChanges(before, after)
+
+        assertEquals(listOf("遮罩阈值"), changes.map { it.label })
+        assertEquals("0.280", changes.single().before)
+        assertEquals("0.240", changes.single().after)
+    }
+
+    @Test
     fun workspaceHistoryUpdatesExistingCanvasInsteadOfDuplicatingIt() {
         WorkspaceHistoryStore.clear()
         val file = createImageFile(width = 48, height = 36)

@@ -124,6 +124,7 @@ fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
             batch = beforeConfig.fullBatch.toString()
         )
         val afterConfig = loadLearningConfig()
+        val preview = generateModelEvolutionPreview(latestUserFeedbackImagePath(), beforeConfig.toDetectionConfig())
         ModelEvolutionStore.append(
             buildModelEvolutionEntry(
                 source = "手动重建",
@@ -132,6 +133,7 @@ fun AppController.retrainSeedAndUserFeedbackModel(): Boolean {
                 trainingType = "完整重建",
                 message = "已合并本地训练样本并重建图标模型",
                 thumbnailPath = latestUserFeedbackImagePath(),
+                preview = preview,
                 before = beforeConfig,
                 after = afterConfig
             )
@@ -183,6 +185,7 @@ fun AppController.retrainContinuousModels(
                     log("模型参数已自适应更新：${evolution.summary()}")
                 }
                 val afterConfig = evolution?.updated ?: loadLearningConfig()
+                val preview = generateModelEvolutionPreview(thumbnailPath ?: latestUserFeedbackImagePath(), beforeConfig.toDetectionConfig())
                 ModelEvolutionStore.append(
                     buildModelEvolutionEntry(
                         source = sourceLabel,
@@ -191,6 +194,7 @@ fun AppController.retrainContinuousModels(
                         trainingType = trainingType,
                         message = "候选模型验证通过，已替换运行时模型",
                         thumbnailPath = thumbnailPath ?: latestUserFeedbackImagePath(),
+                        preview = preview,
                         before = beforeConfig,
                         after = afterConfig
                     )
